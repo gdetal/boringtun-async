@@ -36,7 +36,7 @@ where
 
     type Item = Result<TunPacket, std::io::Error>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.project().inner.poll_next(cx)
     }
 }
@@ -123,23 +123,28 @@ impl Encoder<&[u8]> for TunPacketCodec {
         // TODO handle PACKET_INFO
         dst.reserve(item.len() + 4);
 
-        let mut buf = Vec::<u8>::with_capacity(4);
+        if self.has_packet_info {
+            let mut buf = Vec::<u8>::with_capacity(4);
 
-        // flags is always 0
-        buf.write_u16::<NativeEndian>(0)?;
-        // write the protocol as network byte order
+            // flags is always 0
+            buf.write_u16::<NativeEndian>(0)?;
+            // write the protocol as network byte order
 
-        #[cfg(target_os = "linux")]
-        buf.write_u16::<NetworkEndian>(libc::ETH_P_IP as u16)?;
+            
+            #[cfg(target_os = "linux")]
+            buf.write_u16::<NetworkEndian>(libc::ETH_P_IP as u16)?;
 
-        #[cfg(target_os = "macos")]
-        buf.write_u16::<NetworkEndian>(libc::PF_INET as u16)?;
+            #[cfg(target_os = "macos")]
+            buf.write_u16::<NetworkEndian>(libc::PF_INET as u16)?;
 
-        // TODO others ?
+            // TODO others ?
 
-        println!("packet write HDR: {:?}", buf);
+            println!("packet write HDR: {:?}", buf);
+            
 
-        dst.put_slice(&buf);
+            dst.put_slice(&buf);
+        }
+
         dst.put(item);
         
         Ok(())
