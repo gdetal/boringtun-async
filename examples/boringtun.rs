@@ -44,6 +44,10 @@ async fn main() {
     let mut config = tun::Configuration::default();
 
     config
+        .platform(|config| {
+            #[cfg(target_os = "linux")]
+            platformConfig.packet_information(true);
+        })
         .name("utun42")
         .address((10, 2, 0, 2))
         .netmask((255, 255, 255, 255))
