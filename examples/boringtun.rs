@@ -46,7 +46,7 @@ async fn main() {
     config
         .platform(|config| {
             #[cfg(target_os = "linux")]
-            platformConfig.packet_information(true);
+            config.packet_information(true);
         })
         .name("utun42")
         .address((10, 2, 0, 2))

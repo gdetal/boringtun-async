@@ -128,7 +128,14 @@ impl Encoder<&[u8]> for TunPacketCodec {
         // flags is always 0
         buf.write_u16::<NativeEndian>(0)?;
         // write the protocol as network byte order
+
+        #[cfg(target_os = "linux")]
+        buf.write_u16::<NetworkEndian>(libc::libc::ETH_P_IP as u16)?;
+
+        #[cfg(target_os = "macos")]
         buf.write_u16::<NetworkEndian>(libc::PF_INET as u16)?;
+
+        // TODO others ?
 
         println!("packet write HDR: {:?}", buf);
 
