@@ -1,9 +1,8 @@
 extern crate tun;
 
-use std::net::IpAddr;
-
-use boringtun::{device::{allowed_ips, peer::AllowedIP}, x25519::{PublicKey, StaticSecret}};
+use boringtun::x25519::{PublicKey, StaticSecret};
 use boringtun_async::Tunnel;
+use ip_network::IpNetwork;
 
 struct KeyBytes(pub [u8; 32]);
 
@@ -69,7 +68,7 @@ async fn main() {
 
     let peer_public_key = "MK3425tJbRhEz+1xQLxlL+l6GNl52zKNwo5V0fHEwj4=".parse::<KeyBytes>().unwrap();
     let peer_endpoint = "195.181.167.193:51820".parse().unwrap();
-    let allowed_ips = vec![AllowedIP { addr: "0.0.0.0".parse().unwrap(), cidr: 0 }];
+    let allowed_ips = vec![IpNetwork::from_str_truncate("0.0.0.0/0").unwrap()];
 
     tunnel.add_peer(PublicKey::from(peer_public_key.0), peer_endpoint, &allowed_ips);
 

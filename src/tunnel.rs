@@ -1,8 +1,9 @@
-use std::{collections::HashMap, net::SocketAddr, pin::{pin, Pin}, sync::Arc, task::{Context, Poll}, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, pin::Pin, sync::Arc, task::{Context, Poll}, time::Duration};
 
 use futures::{Future, SinkExt, StreamExt};
-use boringtun::{device::{allowed_ips::AllowedIps, peer::{self, AllowedIP}}, noise::{Tunn, TunnResult}, x25519::{PublicKey, StaticSecret}};
-use tokio::{io::{AsyncRead, AsyncWrite, ReadBuf}, time};
+use boringtun::x25519::{PublicKey, StaticSecret};
+use ip_network_table::IpNetworkTable;
+use tokio::{io::{AsyncRead, AsyncWrite}, time};
 use parking_lot::Mutex;
 
 
@@ -14,17 +15,18 @@ const MAX_UDP_SIZE: usize = (1 << 16) - 1;
 
 // look here for inspiration: https://github.com/firezone/firezone/blob/main/rust/connlib/tunnel/src/lib.rs
 
+// TODO remove devices to support windows 
+
 
 pub struct Tunnel<D> {
     device: Device<D>,
     public_key: PublicKey,
     private_key: StaticSecret,
     peers: HashMap<PublicKey, Arc<Mutex<Peer>>>,
-    peers_by_ip: AllowedIps<Arc<Mutex<Peer>>>,
+    peers_by_ip: IpNetworkTable<Arc<Mutex<Peer>>>,
     peers_by_idx: HashMap<u32, Arc<Mutex<Peer>>>,
     
     refresh_interval: time::Interval,
-
 
     src_buf: [u8; MAX_UDP_SIZE],
     dst_buf: [u8; MAX_UDP_SIZE]
@@ -45,7 +47,7 @@ where D: AsyncRead + AsyncWrite
             public_key,
             private_key,
             peers: Default::default(),
-            peers_by_ip: AllowedIps::new(),
+            peers_by_ip: IpNetworkTable::new(),
             peers_by_idx: Default::default(),
             refresh_interval,
             src_buf: [0u8; MAX_UDP_SIZE],
@@ -53,7 +55,7 @@ where D: AsyncRead + AsyncWrite
         }
     }
 
-    pub fn add_peer(&mut self, public_key: PublicKey, endpoint: SocketAddr, allowed_ips: &[AllowedIP]) {
+    pub fn add_peer(&mut self, public_key: PublicKey, endpoint: SocketAddr, allowed_ips: &[ip_network::IpNetwork]) {
         // TODO fix index:
         let index = 0;
 
@@ -63,8 +65,8 @@ where D: AsyncRead + AsyncWrite
         self.peers.insert(public_key, Arc::clone(&peer));
         self.peers_by_idx.insert(index, Arc::clone(&peer));
 
-        for AllowedIP { addr, cidr } in allowed_ips {
-            self.peers_by_ip.insert(*addr, *cidr as _, Arc::clone(&peer));
+        for ips in allowed_ips {
+            self.peers_by_ip.insert(*ips, Arc::clone(&peer));
         }
     }
 }
@@ -99,7 +101,7 @@ where D: AsyncRead + AsyncWrite + Unpin
             println!("pkt {pkt:?}");
             println!("dst_addr {}", pkt.address());
 
-            let mut peer = match peers.find(pkt.address()) {
+            let mut peer = match peers.longest_match(pkt.address()).map(|(_, d)| d) {
                 Some(peer) => peer.lock(),
                 None => continue,
             };

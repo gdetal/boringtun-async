@@ -130,7 +130,7 @@ impl Encoder<&[u8]> for TunPacketCodec {
         // write the protocol as network byte order
 
         #[cfg(target_os = "linux")]
-        buf.write_u16::<NetworkEndian>(libc::libc::ETH_P_IP as u16)?;
+        buf.write_u16::<NetworkEndian>(libc::ETH_P_IP as u16)?;
 
         #[cfg(target_os = "macos")]
         buf.write_u16::<NetworkEndian>(libc::PF_INET as u16)?;
