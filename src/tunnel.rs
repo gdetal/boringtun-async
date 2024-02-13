@@ -1,157 +1,247 @@
-use std::{collections::HashMap, net::SocketAddr, pin::{pin, Pin}, sync::Arc, task::{Context, Poll}, time::Duration};
+use std::{
+    net::SocketAddr,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
-use futures::{Future, SinkExt, StreamExt};
-use boringtun::{device::{allowed_ips::AllowedIps, peer::{self, AllowedIP}}, noise::{Tunn, TunnResult}, x25519::{PublicKey, StaticSecret}};
-use tokio::{io::{AsyncRead, AsyncWrite, ReadBuf}, time};
-use parking_lot::Mutex;
+use boringtun::x25519::{PublicKey, StaticSecret};
+use futures::{channel::mpsc, ready, Sink, Stream};
+use indexmap::IndexMap;
+use ip_network_table::IpNetworkTable;
+use pin_project::pin_project;
+use tokio_util::bytes::BytesMut;
 
+use crate::{
+    api::{ApiChannel, ApiMessage, ApiRequest, ApiResult},
+    packet::Packet,
+    peer::{Peer, PeerId, PeerSocket},
+    MAX_UDP_SIZE,
+};
 
-use crate::{device::Device, peer::Peer};
-
-// The number of handshakes per second we can tolerate before using cookies
-// const HANDSHAKE_RATE_LIMIT: u64 = 100;
-const MAX_UDP_SIZE: usize = (1 << 16) - 1;
-
-// look here for inspiration: https://github.com/firezone/firezone/blob/main/rust/connlib/tunnel/src/lib.rs
-
-
-pub struct Tunnel<D> {
-    device: Device<D>,
-    public_key: PublicKey,
-    private_key: StaticSecret,
-    peers: HashMap<PublicKey, Arc<Mutex<Peer>>>,
-    peers_by_ip: AllowedIps<Arc<Mutex<Peer>>>,
-    peers_by_idx: HashMap<u32, Arc<Mutex<Peer>>>,
-    
-    refresh_interval: time::Interval,
-
-
-    src_buf: [u8; MAX_UDP_SIZE],
-    dst_buf: [u8; MAX_UDP_SIZE]
+#[pin_project]
+/// Represents a Wireguard tunnel for secure communication with peers.
+pub struct Tunnel {
+    private_key: Option<StaticSecret>,
+    peers: IndexMap<PublicKey, Peer>,
+    peers_by_ip: IpNetworkTable<usize>,
+    listen_port: u16,
+    peers_socket: PeerSocket,
+    channel: (mpsc::Receiver<ApiRequest>, mpsc::Sender<ApiRequest>),
 }
 
-impl<D> Tunnel<D>
-where D: AsyncRead + AsyncWrite
-{
-    pub fn new(private_key: StaticSecret, device: D) -> Self {
-        let public_key = (&private_key).into();
+impl Tunnel {
+    pub fn new(private_key: Option<StaticSecret>, port: u16) -> std::io::Result<Self> {
+        let mut peers_socket = PeerSocket::new(port)?;
+        let (sender, receiver) = mpsc::channel(1);
 
-        // let mut refresh_interval = time::interval(Duration::from_millis(250));
-        let mut refresh_interval = time::interval(Duration::from_secs(1));
-        refresh_interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+        if let Some(ref key) = private_key {
+            peers_socket.set_key(key.clone());
+        }
 
-        Self {
-            device: Device::new(device, true, 1504),
-            public_key,
+        Ok(Self {
             private_key,
             peers: Default::default(),
-            peers_by_ip: AllowedIps::new(),
-            peers_by_idx: Default::default(),
-            refresh_interval,
-            src_buf: [0u8; MAX_UDP_SIZE],
-            dst_buf: [0u8; MAX_UDP_SIZE],
-        }
+            peers_by_ip: IpNetworkTable::new(),
+            listen_port: peers_socket.port,
+            peers_socket,
+            channel: (receiver, sender),
+        })
     }
 
-    pub fn add_peer(&mut self, public_key: PublicKey, endpoint: SocketAddr, allowed_ips: &[AllowedIP]) {
+    pub fn open_api(&self) -> ApiChannel {
+        ApiChannel::new(self.channel.1.clone())
+    }
+
+    fn set_private_key(&mut self, key: StaticSecret) {
+        self.peers_socket.set_key(key.clone());
+        self.private_key = Some(key);
+    }
+
+    fn set_listen_port(&mut self, port: u16) -> ApiResult {
+        self.peers_socket = PeerSocket::new(port)?;
+
+        if let Some(ref private_key) = self.private_key {
+            self.peers_socket.set_key(private_key.clone());
+        }
+
+        for peer in self.peers.values_mut() {
+            peer.shutdown_endpoint();
+        }
+
+        self.listen_port = self.peers_socket.port;
+
+        Ok(())
+    }
+
+    fn clear_peers(&mut self) {
+        self.peers.clear();
+        self.peers_by_ip = IpNetworkTable::new();
+    }
+
+    fn add_peer(
+        &mut self,
+        public_key: PublicKey,
+        endpoint: SocketAddr,
+        allowed_ips: &[ip_network::IpNetwork],
+    ) -> ApiResult {
         // TODO fix index:
         let index = 0;
 
-        let peer = Peer::new(index, self.private_key.clone(), public_key, endpoint);
-        let peer = Arc::new(Mutex::new(peer));
+        let private_key = self
+            .private_key
+            .as_ref()
+            .ok_or("private_key need to be set before adding peer")?;
 
-        self.peers.insert(public_key, Arc::clone(&peer));
-        self.peers_by_idx.insert(index, Arc::clone(&peer));
+        let peer = Peer::new(
+            index,
+            private_key.clone(),
+            public_key,
+            endpoint,
+            self.peers_socket.udpsock_for(endpoint),
+            allowed_ips,
+        );
 
-        for AllowedIP { addr, cidr } in allowed_ips {
-            self.peers_by_ip.insert(*addr, *cidr as _, Arc::clone(&peer));
+        let (idx, _) = self.peers.insert_full(public_key, peer);
+
+        for ips in allowed_ips {
+            self.peers_by_ip.insert(*ips, idx);
+        }
+
+        Ok(())
+    }
+
+    fn poll_api_channel(&mut self, cx: &mut Context<'_>) {
+        if let Poll::Ready(Some(req)) = Pin::new(&mut self.channel.0).poll_next(cx) {
+            let (msg, mut replier) = req.into();
+            match msg {
+                ApiMessage::PrivateKey(key) => self.set_private_key(key),
+                ApiMessage::ListenPort(port) => replier.reply(self.set_listen_port(port)),
+                ApiMessage::PeerFlush => self.clear_peers(),
+                ApiMessage::PeerAdd {
+                    public_key,
+                    endpoint,
+                    allowed_ips,
+                } => replier.reply(self.add_peer(public_key, endpoint, allowed_ips.as_ref())),
+            }
         }
     }
-}
 
-impl<D> Tunnel<D>
-where D: AsyncRead + AsyncWrite + Unpin
-{
-    fn poll_device(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+    pub(crate) fn poll_peers_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::io::Result<Packet>>> {
+        if self.peers.is_empty() {
+            return Poll::Pending;
+        }
 
-        let peers = &self.peers_by_ip;
+        let start = fastrand::usize(0..self.peers.len());
+        let mut index = start;
 
-        for _ in 0..100 {
-            let pkt = match self.device.poll_next_unpin(cx) {
-                Poll::Ready(Some(Ok(pkt))) => {
-                    pkt
-                },
-                Poll::Ready(Some(Err(e))) => {
-                    eprintln!("error device {e}");
-                    return Poll::Pending
-                },
-                Poll::Ready(None) => {
-                    eprintln!("device done");
-                    return Poll::Pending
-                },
-                Poll::Pending => {
-                    println!("data -> pending");
-                    return Poll::Pending
-                },
-            };
+        for _ in 0..self.peers.len() {
+            let (_, mut peer) = self.peers.get_index_mut(index).unwrap();
 
+            if let Poll::Ready(Some(pkt)) = Pin::new(&mut peer).poll_next(cx) {
+                return Poll::Ready(Some(pkt));
+            }
 
-            println!("pkt {pkt:?}");
-            println!("dst_addr {}", pkt.address());
-
-            let mut peer = match peers.find(pkt.address()) {
-                Some(peer) => peer.lock(),
-                None => continue,
-            };
-            peer.encapsulate(pkt.bytes());
+            index = index.wrapping_add(1) % self.peers.len();
         }
 
         Poll::Pending
     }
 
-    fn poll_next_event(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        loop {
-            if self.poll_device(cx).is_ready() {
-                continue
-            }
+    pub(crate) fn poll_listener_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::io::Result<Packet>>> {
+        let this = self.project();
 
-            if self.refresh_interval.poll_tick(cx).is_ready() {
-                for peer in self.peers.values() {
-                    let mut p = peer.lock();
-                    p.tick();
+        let peer_packet = ready!(Pin::new(this.peers_socket).poll_next(cx));
+        let (peer, packet, addr) = match peer_packet {
+            Some(Err(e)) => return Poll::Ready(Some(Err(e))),
+            None => return Poll::Ready(None),
+            Some(Ok(p)) => p,
+        };
+
+        let peer = match peer {
+            PeerId::Index(index) => this.peers.get_index_mut(index).map(|(_, p)| p),
+            PeerId::PublicKey(key) => this.peers.get_mut(&key),
+        };
+
+        let mut peer = match peer {
+            None => return Poll::Pending,
+            Some(peer) => Pin::new(peer),
+        };
+
+        let mut buf = BytesMut::zeroed(MAX_UDP_SIZE);
+
+        let len = ready!(peer.as_mut().decapsulate(packet.as_ref(), &mut buf)).len();
+        let buf = buf.split_to(len);
+
+        match Packet::parse(buf) {
+            None => {
+                log::debug!("unable to parse receive packet");
+                Poll::Pending
+            }
+            Some(pkt) => {
+                peer.set_endpoint(addr);
+                if let Err(e) = peer.connect_endpoint(*this.listen_port) {
+                    log::debug!("unable to connect peer endpoint: {e}");
                 }
-                continue
+
+                Poll::Ready(Some(Ok(pkt)))
             }
-
-            for peer in self.peers.values() {
-                let mut peer = peer.lock();
-                match peer.poll_recv(cx, &mut self.dst_buf) {
-                    Poll::Ready(pkt) => {
-                        println!("write data to device");
-                        match self.device.start_send_unpin(pkt) {
-                            Ok(_) => println!("data writen!"),
-                            Err(e) => println!("unable to write data: {e}"),
-                        }
-
-                        self.device.poll_flush_unpin(cx);
-                    },
-                    Poll::Pending => println!("data pending from peer"),
-                }
-            }
-
-            return Poll::Pending
         }
     }
 }
 
-impl<D> Unpin for Tunnel<D> {}
+impl Stream for Tunnel {
+    type Item = Result<Packet, std::io::Error>;
 
-impl<D> Future for Tunnel<D> 
-where D: AsyncRead + AsyncWrite + Unpin
-{
-    type Output = ();
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.poll_api_channel(cx);
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.poll_next_event(cx)
+        if let Poll::Ready(r) = self.as_mut().poll_peers_next(cx) {
+            return Poll::Ready(r);
+        }
+
+        self.poll_listener_next(cx)
+    }
+}
+
+impl Sink<Packet> for Tunnel {
+    type Error = std::io::Error;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, pkt: Packet) -> Result<(), Self::Error> {
+        let this = self.project();
+
+        let index = match this
+            .peers_by_ip
+            .longest_match(pkt.get_dst_address())
+            .map(|(_, d)| *d)
+        {
+            Some(index) => index,
+            None => {
+                log::debug!("peers: received a packet for an unknown peer");
+                return Ok(());
+            }
+        };
+
+        let (_, peer) = this.peers.get_index_mut(index).unwrap();
+        peer.encapsulate(pkt.get_bytes());
+
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
     }
 }

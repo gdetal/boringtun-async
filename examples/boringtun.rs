@@ -1,76 +1,96 @@
-extern crate tun;
+use std::{
+    fs,
+    net::{IpAddr, Ipv4Addr},
+};
 
-use std::net::IpAddr;
+use async_compat::Compat;
+use boringtun_async::{TunnelBuilder, WgConfig};
+use clap::{Arg, Command};
+use ip_network::IpNetwork;
 
-use boringtun::{device::{allowed_ips, peer::AllowedIP}, x25519::{PublicKey, StaticSecret}};
-use boringtun_async::Tunnel;
-
-struct KeyBytes(pub [u8; 32]);
-
-impl std::str::FromStr for KeyBytes {
-    type Err = &'static str;
-
-    /// Can parse a secret key from a hex or base64 encoded string.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut internal = [0u8; 32];
-
-        match s.len() {
-            64 => {
-                // Try to parse as hex
-                for i in 0..32 {
-                    internal[i] = u8::from_str_radix(&s[i * 2..=i * 2 + 1], 16)
-                        .map_err(|_| "Illegal character in key")?;
-                }
-            }
-            43 | 44 => {
-                // Try to parse as base64
-                if let Ok(decoded_key) = base64::decode(s) {
-                    if decoded_key.len() == internal.len() {
-                        internal[..].copy_from_slice(&decoded_key);
-                    } else {
-                        return Err("Illegal character in key");
-                    }
-                }
-            }
-            _ => return Err("Illegal key size"),
-        }
-
-        Ok(KeyBytes(internal))
-    }
-}
-
+/// Main function that runs the BoringTun VPN client.
 #[tokio::main]
 async fn main() {
+    // Create a new command line interface using the `clap` crate
+    let cmd = Command::new("vpn-service")
+        .version(env!("CARGO_PKG_VERSION"))
+        .args(&[
+            Arg::new("config")
+                .long("config")
+                .required(true)
+                .value_parser(clap::value_parser!(String))
+                .help("Wireguard configuration file"),
+            Arg::new("dev")
+                .long("device")
+                .value_parser(clap::value_parser!(String))
+                .default_value("utun42")
+                .help("Tunnel device name"),
+        ]);
+
+    // Parse the command line arguments
+    let args = cmd.get_matches();
+    let config_file = args.get_one::<String>("config").unwrap();
+    let device_name = args.get_one::<String>("dev").unwrap();
+
+    // Read the Wireguard configuration file
+    let data = fs::read_to_string(config_file).unwrap();
+    let wg_config = WgConfig::from_str(&data).unwrap();
+
+    // Create a new tunnel configuration
     let mut config = tun::Configuration::default();
 
+    let netmask = IpNetwork::new_truncate(
+        IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255)),
+        wg_config.interface.address.netmask(),
+    )
+    .unwrap();
+
+    // Set the tunnel device name, address, netmask, and MTU and bring up the
+    // device
     config
-        .name("utun42")
-        .address((10, 2, 0, 2))
-        .netmask((255, 255, 255, 255))
-        .destination((10, 2, 0, 2))
+        .name(device_name)
+        .address(wg_config.interface.address.network_address())
+        .netmask(netmask.network_address())
+        .mtu(wg_config.interface.mtu.unwrap_or(1420) as i32)
         .up();
 
+    // Set platform-specific configuration options
+    #[cfg(target_os = "linux")]
+    let config = config.platform(|config| {
+        config.packet_information(true);
+    });
 
-    let dev = tun::create_as_async(&config).unwrap();
+    // Configure the routing via the tunnel (Linux/MacOS only)
+    #[cfg(not(target_os = "windows"))]
+    let config = config.destination(wg_config.interface.address.network_address());
 
-    let ifindex = default_net::interface::get_interfaces().iter().find(|e| e.name == "utun42").unwrap().index;
+    // Create a tunnel device asynchronously using the provided configuration
+    let dev = tun::create_as_async(config).unwrap();
 
-    let handle = net_route::Handle::new().unwrap();
-    let route = net_route::Route::new("8.8.8.8".parse().unwrap(), 32)
-        .with_ifindex(ifindex);
-    handle.add(&route).await.unwrap();
+    // Create a new BoringTun tunnel builder
+    let tunnel = TunnelBuilder::default()
+        .private_key(wg_config.interface.privatekey)
+        .with_device(Compat::new(dev))
+        .unwrap()
+        .has_packet_info(!cfg!(target_os = "windows"))
+        .spawn()
+        .unwrap();
 
-    let private_key = "aCyyrK5JeEPNkCs4fm92YcYnefQSvekUeJUGl1Kh5UE=".parse::<KeyBytes>().unwrap();
-    let mut tunnel = Tunnel::new(StaticSecret::from(private_key.0), dev);
+    // Add a peer to the tunnel
+    tunnel
+        .api()
+        .add_peer(
+            wg_config.peer.publickey,
+            wg_config.peer.endpoint,
+            wg_config.peer.allowedips,
+        )
+        .await
+        .unwrap();
 
-    let peer_public_key = "MK3425tJbRhEz+1xQLxlL+l6GNl52zKNwo5V0fHEwj4=".parse::<KeyBytes>().unwrap();
-    let peer_endpoint = "195.181.167.193:51820".parse().unwrap();
-    let allowed_ips = vec![AllowedIP { addr: "0.0.0.0".parse().unwrap(), cidr: 0 }];
+    // Wait for a Ctrl+C signal to cancel the tunnel
+    tokio::signal::ctrl_c().await.unwrap();
+    tunnel.cancel();
 
-    tunnel.add_peer(PublicKey::from(peer_public_key.0), peer_endpoint, &allowed_ips);
-
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {},
-        _ = tunnel => {},
-    };
+    // Wait for the tunnel to finish
+    tunnel.await.unwrap();
 }
