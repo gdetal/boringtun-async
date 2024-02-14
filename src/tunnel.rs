@@ -1,11 +1,17 @@
-use std::{collections::HashMap, net::SocketAddr, pin::Pin, sync::Arc, task::{Context, Poll}, time::Duration};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 
-use futures::{Future, AsyncRead, AsyncWrite, SinkExt, StreamExt};
 use boringtun::x25519::{PublicKey, StaticSecret};
+use futures::{AsyncRead, AsyncWrite, Future, SinkExt, StreamExt};
 use ip_network_table::IpNetworkTable;
-use tokio::time;
 use parking_lot::Mutex;
-
+use tokio::time;
 
 use crate::{device::Device, peer::Peer};
 
@@ -15,47 +21,46 @@ const MAX_UDP_SIZE: usize = (1 << 16) - 1;
 
 // look here for inspiration: https://github.com/firezone/firezone/blob/main/rust/connlib/tunnel/src/lib.rs
 
-// TODO remove devices to support windows 
-
+// TODO remove devices to support windows
 
 pub struct Tunnel<D> {
     device: Device<D>,
-    public_key: PublicKey,
     private_key: StaticSecret,
     peers: HashMap<PublicKey, Arc<Mutex<Peer>>>,
     peers_by_ip: IpNetworkTable<Arc<Mutex<Peer>>>,
     peers_by_idx: HashMap<u32, Arc<Mutex<Peer>>>,
-    
+
     refresh_interval: time::Interval,
 
-    src_buf: [u8; MAX_UDP_SIZE],
-    dst_buf: [u8; MAX_UDP_SIZE]
+    dst_buf: [u8; MAX_UDP_SIZE],
 }
 
 impl<D> Tunnel<D>
-where D: AsyncRead + AsyncWrite
+where
+    D: AsyncRead + AsyncWrite,
 {
     pub fn new(private_key: StaticSecret, device: D) -> Self {
-        let public_key = (&private_key).into();
-
         // let mut refresh_interval = time::interval(Duration::from_millis(250));
         let mut refresh_interval = time::interval(Duration::from_secs(1));
         refresh_interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
         Self {
             device: Device::new(device, true, 1504),
-            public_key,
             private_key,
             peers: Default::default(),
             peers_by_ip: IpNetworkTable::new(),
             peers_by_idx: Default::default(),
             refresh_interval,
-            src_buf: [0u8; MAX_UDP_SIZE],
             dst_buf: [0u8; MAX_UDP_SIZE],
         }
     }
 
-    pub fn add_peer(&mut self, public_key: PublicKey, endpoint: SocketAddr, allowed_ips: &[ip_network::IpNetwork]) {
+    pub fn add_peer(
+        &mut self,
+        public_key: PublicKey,
+        endpoint: SocketAddr,
+        allowed_ips: &[ip_network::IpNetwork],
+    ) {
         // TODO fix index:
         let index = 0;
 
@@ -72,31 +77,28 @@ where D: AsyncRead + AsyncWrite
 }
 
 impl<D> Tunnel<D>
-where D: AsyncRead + AsyncWrite + Unpin
+where
+    D: AsyncRead + AsyncWrite + Unpin,
 {
     fn poll_device(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-
         let peers = &self.peers_by_ip;
 
         for _ in 0..100 {
             let pkt = match self.device.poll_next_unpin(cx) {
-                Poll::Ready(Some(Ok(pkt))) => {
-                    pkt
-                },
+                Poll::Ready(Some(Ok(pkt))) => pkt,
                 Poll::Ready(Some(Err(e))) => {
                     eprintln!("error device {e}");
-                    return Poll::Pending
-                },
+                    return Poll::Pending;
+                }
                 Poll::Ready(None) => {
                     eprintln!("device done");
-                    return Poll::Pending
-                },
+                    return Poll::Pending;
+                }
                 Poll::Pending => {
                     println!("data -> pending");
-                    return Poll::Pending
-                },
+                    return Poll::Pending;
+                }
             };
-
 
             println!("pkt {pkt:?}");
             println!("dst_addr {}", pkt.address());
@@ -114,7 +116,7 @@ where D: AsyncRead + AsyncWrite + Unpin
     fn poll_next_event(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         loop {
             if self.poll_device(cx).is_ready() {
-                continue
+                continue;
             }
 
             if self.refresh_interval.poll_tick(cx).is_ready() {
@@ -122,7 +124,7 @@ where D: AsyncRead + AsyncWrite + Unpin
                     let mut p = peer.lock();
                     p.tick();
                 }
-                continue
+                continue;
             }
 
             for peer in self.peers.values() {
@@ -135,21 +137,22 @@ where D: AsyncRead + AsyncWrite + Unpin
                             Err(e) => println!("unable to write data: {e}"),
                         }
 
-                        self.device.poll_flush_unpin(cx);
-                    },
+                        let _ = self.device.poll_flush_unpin(cx);
+                    }
                     Poll::Pending => println!("data pending from peer"),
                 }
             }
 
-            return Poll::Pending
+            return Poll::Pending;
         }
     }
 }
 
 impl<D> Unpin for Tunnel<D> {}
 
-impl<D> Future for Tunnel<D> 
-where D: AsyncRead + AsyncWrite + Unpin
+impl<D> Future for Tunnel<D>
+where
+    D: AsyncRead + AsyncWrite + Unpin,
 {
     type Output = ();
 

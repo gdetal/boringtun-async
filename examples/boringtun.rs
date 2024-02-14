@@ -54,24 +54,34 @@ async fn main() {
         .destination((10, 2, 0, 2))
         .up();
 
-
     let dev = tun::create_as_async(&config).unwrap();
 
-    let ifindex = default_net::interface::get_interfaces().iter().find(|e| e.name == "utun42").unwrap().index;
+    let ifindex = default_net::interface::get_interfaces()
+        .iter()
+        .find(|e| e.name == "utun42")
+        .unwrap()
+        .index;
 
     let handle = net_route::Handle::new().unwrap();
-    let route = net_route::Route::new("8.8.8.8".parse().unwrap(), 32)
-        .with_ifindex(ifindex);
+    let route = net_route::Route::new("8.8.8.8".parse().unwrap(), 32).with_ifindex(ifindex);
     handle.add(&route).await.unwrap();
 
-    let private_key = "aCyyrK5JeEPNkCs4fm92YcYnefQSvekUeJUGl1Kh5UE=".parse::<KeyBytes>().unwrap();
+    let private_key = "aCyyrK5JeEPNkCs4fm92YcYnefQSvekUeJUGl1Kh5UE="
+        .parse::<KeyBytes>()
+        .unwrap();
     let mut tunnel = Tunnel::new(StaticSecret::from(private_key.0), Compat::new(dev));
 
-    let peer_public_key = "MK3425tJbRhEz+1xQLxlL+l6GNl52zKNwo5V0fHEwj4=".parse::<KeyBytes>().unwrap();
+    let peer_public_key = "MK3425tJbRhEz+1xQLxlL+l6GNl52zKNwo5V0fHEwj4="
+        .parse::<KeyBytes>()
+        .unwrap();
     let peer_endpoint = "195.181.167.193:51820".parse().unwrap();
     let allowed_ips = vec![IpNetwork::from_str_truncate("0.0.0.0/0").unwrap()];
 
-    tunnel.add_peer(PublicKey::from(peer_public_key.0), peer_endpoint, &allowed_ips);
+    tunnel.add_peer(
+        PublicKey::from(peer_public_key.0),
+        peer_endpoint,
+        &allowed_ips,
+    );
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},

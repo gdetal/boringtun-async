@@ -1,11 +1,18 @@
-use std::{net::IpAddr, pin::Pin, task::{Context, Poll}};
+use std::{
+    net::IpAddr,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use async_compat::Compat;
-use byteorder::{NativeEndian, NetworkEndian, WriteBytesExt};
 use boringtun::noise::Tunn;
+use byteorder::{NativeEndian, NetworkEndian, WriteBytesExt};
 use futures::{AsyncRead, AsyncWrite, Sink, Stream};
 use pin_project::pin_project;
-use tokio_util::{bytes::{BufMut, Bytes, BytesMut}, codec::{Decoder, Encoder, Framed}};
+use tokio_util::{
+    bytes::{BufMut, Bytes, BytesMut},
+    codec::{Decoder, Encoder, Framed},
+};
 
 const PACKET_INFO_SIZE: usize = 4;
 
@@ -17,23 +24,25 @@ pub(crate) struct Device<D> {
 
 impl<D> Device<D>
 where
-    D: AsyncRead + AsyncWrite
+    D: AsyncRead + AsyncWrite,
 {
     pub(crate) fn new(device: D, has_packet_info: bool, pkt_size: usize) -> Self {
         Self {
-            inner: Framed::new(Compat::new(device), TunPacketCodec {
-                has_packet_info,
-                pkt_size
-            }),
+            inner: Framed::new(
+                Compat::new(device),
+                TunPacketCodec {
+                    has_packet_info,
+                    pkt_size,
+                },
+            ),
         }
     }
 }
 
 impl<D> Stream for Device<D>
 where
-    D: AsyncRead
+    D: AsyncRead,
 {
-
     type Item = Result<TunPacket, std::io::Error>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -41,10 +50,9 @@ where
     }
 }
 
-
 impl<D> Sink<&[u8]> for Device<D>
 where
-    D: AsyncWrite
+    D: AsyncWrite,
 {
     type Error = std::io::Error;
 
@@ -110,13 +118,12 @@ impl Decoder for TunPacketCodec {
 
         match Tunn::dst_address(pkt.as_ref()) {
             Some(addr) => Ok(Some(TunPacket(addr, pkt.freeze()))),
-            None => return Ok(None),
+            None => Ok(None),
         }
     }
 }
 
 impl Encoder<&[u8]> for TunPacketCodec {
-
     type Error = std::io::Error;
 
     fn encode(&mut self, item: &[u8], dst: &mut BytesMut) -> Result<(), Self::Error> {
@@ -130,7 +137,6 @@ impl Encoder<&[u8]> for TunPacketCodec {
             buf.write_u16::<NativeEndian>(0)?;
             // write the protocol as network byte order
 
-            
             #[cfg(target_os = "linux")]
             buf.write_u16::<NetworkEndian>(libc::ETH_P_IP as u16)?;
 
@@ -140,13 +146,12 @@ impl Encoder<&[u8]> for TunPacketCodec {
             // TODO others ?
 
             println!("packet write HDR: {:?}", buf);
-            
 
             dst.put_slice(&buf);
         }
 
         dst.put(item);
-        
+
         Ok(())
     }
 }
