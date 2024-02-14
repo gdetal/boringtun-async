@@ -146,6 +146,10 @@ impl Peer {
             }
             TunnResult::WriteToTunnelV4(packet, addr) => {
                 println!("peer ready {addr}");
+
+                let parsed_pkt = etherparse::SlicedPacket::from_ip(packet).unwrap();
+                println!("received from udp: {:#?}", parsed_pkt);
+
                 if self.allowed_ips.longest_match(addr).is_some() {
                     return Poll::Ready(packet)
                 }
