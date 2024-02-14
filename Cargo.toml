@@ -13,6 +13,7 @@ byteorder = "1.5.0"
 libc = "0.2.153"
 ip_network = "0.4.1"
 ip_network_table = "0.2.0"
+async-compat = "0.2.3"
 
 [dependencies.boringtun]
 version = "0.6.0"

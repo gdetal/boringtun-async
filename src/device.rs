@@ -1,10 +1,10 @@
 use std::{net::IpAddr, pin::Pin, task::{Context, Poll}};
 
+use async_compat::Compat;
 use byteorder::{NativeEndian, NetworkEndian, WriteBytesExt};
 use boringtun::noise::Tunn;
-use futures::{Sink, Stream};
+use futures::{AsyncRead, AsyncWrite, Sink, Stream};
 use pin_project::pin_project;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::{bytes::{BufMut, Bytes, BytesMut}, codec::{Decoder, Encoder, Framed}};
 
 const PACKET_INFO_SIZE: usize = 4;
@@ -12,7 +12,7 @@ const PACKET_INFO_SIZE: usize = 4;
 #[pin_project]
 pub(crate) struct Device<D> {
     #[pin]
-    inner: Framed<D, TunPacketCodec>,
+    inner: Framed<Compat<D>, TunPacketCodec>,
 }
 
 impl<D> Device<D>
@@ -21,7 +21,7 @@ where
 {
     pub(crate) fn new(device: D, has_packet_info: bool, pkt_size: usize) -> Self {
         Self {
-            inner: Framed::new(device, TunPacketCodec {
+            inner: Framed::new(Compat::new(device), TunPacketCodec {
                 has_packet_info,
                 pkt_size
             }),

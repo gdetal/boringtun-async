@@ -1,9 +1,9 @@
 use std::{collections::HashMap, net::SocketAddr, pin::Pin, sync::Arc, task::{Context, Poll}, time::Duration};
 
-use futures::{Future, SinkExt, StreamExt};
+use futures::{Future, AsyncRead, AsyncWrite, SinkExt, StreamExt};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use ip_network_table::IpNetworkTable;
-use tokio::{io::{AsyncRead, AsyncWrite}, time};
+use tokio::time;
 use parking_lot::Mutex;
 
 

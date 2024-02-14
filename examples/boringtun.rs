@@ -1,5 +1,6 @@
 extern crate tun;
 
+use async_compat::Compat;
 use boringtun::x25519::{PublicKey, StaticSecret};
 use boringtun_async::Tunnel;
 use ip_network::IpNetwork;
@@ -64,7 +65,7 @@ async fn main() {
     handle.add(&route).await.unwrap();
 
     let private_key = "aCyyrK5JeEPNkCs4fm92YcYnefQSvekUeJUGl1Kh5UE=".parse::<KeyBytes>().unwrap();
-    let mut tunnel = Tunnel::new(StaticSecret::from(private_key.0), dev);
+    let mut tunnel = Tunnel::new(StaticSecret::from(private_key.0), Compat::new(dev));
 
     let peer_public_key = "MK3425tJbRhEz+1xQLxlL+l6GNl52zKNwo5V0fHEwj4=".parse::<KeyBytes>().unwrap();
     let peer_endpoint = "195.181.167.193:51820".parse().unwrap();
