@@ -7,6 +7,7 @@ use boringtun::{
     noise::{errors::WireGuardError, Tunn, TunnResult},
     x25519::{PublicKey, StaticSecret},
 };
+use ip_network::IpNetwork;
 use ip_network_table::IpNetworkTable;
 use tokio::{io::ReadBuf, net::UdpSocket};
 
@@ -31,6 +32,7 @@ impl Peer {
         private_key: StaticSecret,
         public_key: PublicKey,
         endpoint: SocketAddr,
+        allowed_ips: &[IpNetwork]
     ) -> Self {
         // TODO handle error:
         let udp_conn = socket2::Socket::new(
@@ -51,11 +53,17 @@ impl Peer {
         let udp_conn = std::net::UdpSocket::from(udp_conn);
         let conn = UdpSocket::from_std(udp_conn).unwrap();
 
+        let mut allowed_ips_set = IpNetworkTable::new();
+
+        for ips in allowed_ips {
+            allowed_ips_set.insert(*ips, ());
+        }
+
         Self {
             endpoint,
             tunnel: Tunn::new(private_key, public_key, None, None, index, None).unwrap(),
             conn,
-            allowed_ips: IpNetworkTable::new(),
+            allowed_ips: allowed_ips_set,
         }
     }
 
@@ -133,16 +141,16 @@ impl Peer {
                 self.conn.try_send(packet).ok();
             }
             TunnResult::WriteToTunnelV4(packet, addr) => {
-                println!("peer ready");
-                // if self.allowed_ips.longest_match(addr).is_some() {
+                println!("peer ready {addr}");
+                if self.allowed_ips.longest_match(addr).is_some() {
                     return Poll::Ready(packet)
-                // }
+                }
             }
             TunnResult::WriteToTunnelV6(packet, addr) => {
                 println!("peer ready");
-                // if self.allowed_ips.longest_match(addr).is_some() {
+                if self.allowed_ips.longest_match(addr).is_some() {
                     return Poll::Ready(packet)
-                // }
+                }
             }
         }
 
@@ -153,6 +161,7 @@ impl Peer {
             while let TunnResult::WriteToNetwork(packet) =
                 self.tunnel.decapsulate(None, &[], &mut buf)
             {
+                println!("peer flush packet: {packet:?}");
                 self.conn.try_send(packet).ok();
             }
         }

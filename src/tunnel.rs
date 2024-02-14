@@ -64,7 +64,7 @@ where
         // TODO fix index:
         let index = 0;
 
-        let peer = Peer::new(index, self.private_key.clone(), public_key, endpoint);
+        let peer = Peer::new(index, self.private_key.clone(), public_key, endpoint, allowed_ips);
         let peer = Arc::new(Mutex::new(peer));
 
         self.peers.insert(public_key, Arc::clone(&peer));
