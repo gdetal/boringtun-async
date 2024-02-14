@@ -122,7 +122,7 @@ where
             if self.refresh_interval.poll_tick(cx).is_ready() {
                 for peer in self.peers.values() {
                     let mut p = peer.lock();
-                    p.tick();
+                    p.update_timers();
                 }
                 continue;
             }

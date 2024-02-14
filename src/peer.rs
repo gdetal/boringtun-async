@@ -7,17 +7,22 @@ use boringtun::{
     noise::{errors::WireGuardError, Tunn, TunnResult},
     x25519::{PublicKey, StaticSecret},
 };
+use ip_network_table::IpNetworkTable;
 use tokio::{io::ReadBuf, net::UdpSocket};
 
 const MAX_UDP_SIZE: usize = (1 << 16) - 1;
+
+#[derive(Debug)]
+pub(crate) enum PeerError {
+    WireguardError(WireGuardError),
+    IO(std::io::Error),
+}
 
 pub struct Peer {
     pub(crate) tunnel: Tunn,
     endpoint: SocketAddr,
     conn: UdpSocket,
-
-    src_buf: [u8; MAX_UDP_SIZE],
-    dst_buf: [u8; MAX_UDP_SIZE],
+    allowed_ips: IpNetworkTable<()>,
 }
 
 impl Peer {
@@ -50,41 +55,42 @@ impl Peer {
             endpoint,
             tunnel: Tunn::new(private_key, public_key, None, None, index, None).unwrap(),
             conn,
-            src_buf: [0u8; MAX_UDP_SIZE],
-            dst_buf: [0u8; MAX_UDP_SIZE],
+            allowed_ips: IpNetworkTable::new(),
         }
     }
 
     pub(crate) fn encapsulate(&mut self, pkt: &[u8]) {
-        match self.tunnel.encapsulate(pkt, &mut self.dst_buf[..]) {
-            TunnResult::Done => {
-                println!("done?");
-            }
-            TunnResult::Err(e) => {
-                println!("Encapsulate error {e:?}")
-            }
-            TunnResult::WriteToNetwork(packet) => match self.conn.try_send(packet) {
-                Ok(_) => println!("send packet {packet:?}"),
-                Err(_) => println!("unable to send {packet:?}"),
+        // TODO improve:
+        let mut buf = [0; MAX_UDP_SIZE];
+
+        match self.tunnel.encapsulate(pkt, &mut buf) {
+            TunnResult::Done => {},
+            TunnResult::Err(e) => eprintln!("encapsulate error: {e:?}"),
+            TunnResult::WriteToNetwork(packet) => {
+                self.conn.try_send(packet).ok();
             },
             _ => panic!("Unexpected result from encapsulate"),
-        };
+        }
     }
 
-    pub(crate) fn tick(&mut self) {
-        match self.tunnel.update_timers(&mut self.src_buf[..]) {
-            TunnResult::Done => {}
+    pub(crate) fn update_timers(&mut self) {
+        // TODO improve:
+        let mut buf = [0; MAX_UDP_SIZE];
+
+        match self.tunnel.update_timers(&mut buf) {
+            TunnResult::Done => {},
             TunnResult::Err(WireGuardError::ConnectionExpired) => {
-                // TODO
-                //self.shutdown_endpoint(); // close open udp socket
+                // Should close connection:
+                println!("connection expired")
             }
-            TunnResult::Err(e) => println!("Timer error: {e:?}"),
-            TunnResult::WriteToNetwork(packet) => match self.conn.try_send(packet) {
-                Ok(_) => println!("send packet {packet:?}"),
-                Err(_) => println!("unable to send {packet:?}"),
+            TunnResult::Err(e) => {
+                eprintln!("update_timers error: {e:?}")
+            },
+            TunnResult::WriteToNetwork(packet) => {
+                self.conn.try_send(packet).ok();
             },
             _ => panic!("Unexpected result from update_timers"),
-        };
+        }
     }
 
     pub(crate) fn poll_recv<'a>(
@@ -92,12 +98,15 @@ impl Peer {
         cx: &mut Context<'_>,
         dst_buf: &'a mut [u8],
     ) -> Poll<&'a mut [u8]> {
-        let mut buf = ReadBuf::new(&mut self.src_buf);
+        // TODO improve:
+        let mut buf = [0; MAX_UDP_SIZE];
+        let mut buf = ReadBuf::new(&mut buf);
 
         let packet = match self.conn.poll_recv(cx, &mut buf) {
             Poll::Ready(Ok(_)) => buf.filled(),
-            Poll::Ready(Err(_)) => {
-                println!("unable to receive packets");
+            Poll::Ready(Err(e)) => {
+                // TODO close conn ??
+                eprintln!("unable to receive packets: {e}");
                 return Poll::Pending;
             }
             Poll::Pending => {
@@ -108,35 +117,45 @@ impl Peer {
 
         println!("peer received packet: {packet:?}");
 
+        let mut flush = false;
         match self
             .tunnel
             .decapsulate(Some(self.endpoint.ip()), packet, &mut dst_buf[..])
         {
-            TunnResult::Done => {}
-            TunnResult::Err(e) => eprintln!("Decapsulate error {:?}", e),
+            TunnResult::Done => {
+                println!("peer done");
+            },
+            TunnResult::Err(e) => eprintln!("decapsulate error {:?}", e),
             TunnResult::WriteToNetwork(packet) => {
+                flush = true;
                 println!("peer write to network");
 
-                match self.conn.try_send(packet) {
-                    Ok(_) => println!("send packet {packet:?}"),
-                    Err(_) => println!("unable to send {packet:?}"),
-                }
+                self.conn.try_send(packet).ok();
             }
-            TunnResult::WriteToTunnelV4(packet, _) => {
-                // if p.is_allowed_ip(addr) {
-                //     iface.write4(packet);
+            TunnResult::WriteToTunnelV4(packet, addr) => {
+                println!("peer ready");
+                // if self.allowed_ips.longest_match(addr).is_some() {
+                    return Poll::Ready(packet)
                 // }
-
-                return Poll::Ready(packet);
             }
-            TunnResult::WriteToTunnelV6(packet, _) => {
-                // if p.is_allowed_ip(addr) {
-                //     iface.write4(packet);
+            TunnResult::WriteToTunnelV6(packet, addr) => {
+                println!("peer ready");
+                // if self.allowed_ips.longest_match(addr).is_some() {
+                    return Poll::Ready(packet)
                 // }
-                return Poll::Ready(packet);
             }
-        };
+        }
 
+        if flush {
+            // TODO improve:
+            let mut buf = [0; MAX_UDP_SIZE];
+            // Flush pending queue
+            while let TunnResult::WriteToNetwork(packet) =
+                self.tunnel.decapsulate(None, &[], &mut buf)
+            {
+                self.conn.try_send(packet).ok();
+            }
+        }
         Poll::Pending
     }
 }

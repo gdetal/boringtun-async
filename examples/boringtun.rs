@@ -56,6 +56,8 @@ async fn main() {
 
     let dev = tun::create_as_async(&config).unwrap();
 
+    println!("interface: {:#?}", default_net::interface::get_interfaces());
+
     let ifindex = default_net::interface::get_interfaces()
         .iter()
         .find(|e| e.name == "utun42")
