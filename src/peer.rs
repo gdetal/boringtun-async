@@ -71,6 +71,10 @@ impl Peer {
         // TODO improve:
         let mut buf = [0; MAX_UDP_SIZE];
 
+        let parsed_pkt = etherparse::SlicedPacket::from_ip(pkt).unwrap();
+
+        println!("send over udp: {:#?}", parsed_pkt);
+
         match self.tunnel.encapsulate(pkt, &mut buf) {
             TunnResult::Done => {},
             TunnResult::Err(e) => eprintln!("encapsulate error: {e:?}"),
