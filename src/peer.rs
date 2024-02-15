@@ -13,12 +13,6 @@ use tokio::{io::ReadBuf, net::UdpSocket};
 
 const MAX_UDP_SIZE: usize = (1 << 16) - 1;
 
-#[derive(Debug)]
-pub(crate) enum PeerError {
-    WireguardError(WireGuardError),
-    IO(std::io::Error),
-}
-
 pub struct Peer {
     pub(crate) tunnel: Tunn,
     endpoint: SocketAddr,
@@ -32,7 +26,7 @@ impl Peer {
         private_key: StaticSecret,
         public_key: PublicKey,
         endpoint: SocketAddr,
-        allowed_ips: &[IpNetwork]
+        allowed_ips: &[IpNetwork],
     ) -> Self {
         // TODO handle error:
         let udp_conn = socket2::Socket::new(
@@ -71,16 +65,12 @@ impl Peer {
         // TODO improve:
         let mut buf = [0; MAX_UDP_SIZE];
 
-        let parsed_pkt = etherparse::SlicedPacket::from_ip(pkt).unwrap();
-
-        println!("send over udp: {:#?}", parsed_pkt);
-
         match self.tunnel.encapsulate(pkt, &mut buf) {
-            TunnResult::Done => {},
+            TunnResult::Done => {}
             TunnResult::Err(e) => eprintln!("encapsulate error: {e:?}"),
             TunnResult::WriteToNetwork(packet) => {
                 self.conn.try_send(packet).ok();
-            },
+            }
             _ => panic!("Unexpected result from encapsulate"),
         }
     }
@@ -90,17 +80,17 @@ impl Peer {
         let mut buf = [0; MAX_UDP_SIZE];
 
         match self.tunnel.update_timers(&mut buf) {
-            TunnResult::Done => {},
+            TunnResult::Done => {}
             TunnResult::Err(WireGuardError::ConnectionExpired) => {
                 // Should close connection:
                 println!("connection expired")
             }
             TunnResult::Err(e) => {
                 eprintln!("update_timers error: {e:?}")
-            },
+            }
             TunnResult::WriteToNetwork(packet) => {
                 self.conn.try_send(packet).ok();
-            },
+            }
             _ => panic!("Unexpected result from update_timers"),
         }
     }
@@ -127,8 +117,6 @@ impl Peer {
             }
         };
 
-        println!("peer received packet: {packet:?}");
-
         let mut flush = false;
         match self
             .tunnel
@@ -136,7 +124,7 @@ impl Peer {
         {
             TunnResult::Done => {
                 println!("peer done");
-            },
+            }
             TunnResult::Err(e) => eprintln!("decapsulate error {:?}", e),
             TunnResult::WriteToNetwork(packet) => {
                 flush = true;
@@ -145,19 +133,16 @@ impl Peer {
                 self.conn.try_send(packet).ok();
             }
             TunnResult::WriteToTunnelV4(packet, addr) => {
-                println!("peer ready {addr}");
-
-                let parsed_pkt = etherparse::SlicedPacket::from_ip(packet).unwrap();
-                println!("received from udp: {:#?}", parsed_pkt);
+                println!("peer ready");
 
                 if self.allowed_ips.longest_match(addr).is_some() {
-                    return Poll::Ready(packet)
+                    return Poll::Ready(packet);
                 }
             }
             TunnResult::WriteToTunnelV6(packet, addr) => {
                 println!("peer ready");
                 if self.allowed_ips.longest_match(addr).is_some() {
-                    return Poll::Ready(packet)
+                    return Poll::Ready(packet);
                 }
             }
         }

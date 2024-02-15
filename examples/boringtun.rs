@@ -2,7 +2,7 @@ extern crate tun;
 
 use async_compat::Compat;
 use boringtun::x25519::{PublicKey, StaticSecret};
-use boringtun_async::Tunnel;
+use boringtun_async::{Device, Tunnel};
 use ip_network::IpNetwork;
 
 struct KeyBytes(pub [u8; 32]);
@@ -56,8 +56,6 @@ async fn main() {
 
     let dev = tun::create_as_async(&config).unwrap();
 
-    println!("interface: {:#?}", default_net::interface::get_interfaces());
-
     let ifindex = default_net::interface::get_interfaces()
         .iter()
         .find(|e| e.name == "utun42")
@@ -65,13 +63,15 @@ async fn main() {
         .index;
 
     let handle = net_route::Handle::new().unwrap();
-    let route = net_route::Route::new("8.8.8.8".parse().unwrap(), 32).with_ifindex(ifindex);
+    let route = net_route::Route::new("146.59.195.115".parse().unwrap(), 32).with_ifindex(ifindex);
     handle.add(&route).await.unwrap();
+
+    let dev = Device::new(Compat::new(dev), true, 1512);
 
     let private_key = "aCyyrK5JeEPNkCs4fm92YcYnefQSvekUeJUGl1Kh5UE="
         .parse::<KeyBytes>()
         .unwrap();
-    let mut tunnel = Tunnel::new(StaticSecret::from(private_key.0), Compat::new(dev));
+    let mut tunnel = Tunnel::new(StaticSecret::from(private_key.0), dev);
 
     let peer_public_key = "MK3425tJbRhEz+1xQLxlL+l6GNl52zKNwo5V0fHEwj4="
         .parse::<KeyBytes>()
@@ -87,6 +87,10 @@ async fn main() {
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},
-        _ = tunnel => {},
+        res = tunnel.run() => {
+            if let Err(e) = res {
+                eprintln!("failed with {e}");
+            }
+        },
     };
 }
