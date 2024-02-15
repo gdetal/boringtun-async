@@ -61,7 +61,8 @@ async fn main() {
     let dev = tun::create_as_async(&config).unwrap();
 
     let handle = net_route::Handle::new().unwrap();
-    let route = net_route::Route::new("146.59.195.115".parse().unwrap(), 32).with_gateway("10.2.0.2".parse().unwrap());
+    let route = net_route::Route::new("146.59.195.115".parse().unwrap(), 32)
+        .with_gateway("10.2.0.2".parse().unwrap());
     handle.add(&route).await.unwrap();
 
     #[cfg(target_os = "windows")]

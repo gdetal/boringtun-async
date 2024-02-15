@@ -1,5 +1,5 @@
-mod device;
 mod codec;
+mod device;
 mod packet;
 mod peer;
 mod peers;
