@@ -112,7 +112,6 @@ impl Peer {
                 return Poll::Pending;
             }
             Poll::Pending => {
-                println!("not ready to receive packets");
                 return Poll::Pending;
             }
         };
@@ -133,14 +132,12 @@ impl Peer {
                 self.conn.try_send(packet).ok();
             }
             TunnResult::WriteToTunnelV4(packet, addr) => {
-                println!("peer ready");
-
                 if self.allowed_ips.longest_match(addr).is_some() {
+                    println!("peer ready packet");
                     return Poll::Ready(packet);
                 }
             }
             TunnResult::WriteToTunnelV6(packet, addr) => {
-                println!("peer ready");
                 if self.allowed_ips.longest_match(addr).is_some() {
                     return Poll::Ready(packet);
                 }

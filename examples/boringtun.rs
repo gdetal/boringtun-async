@@ -52,6 +52,7 @@ async fn main() {
         .address((10, 2, 0, 2))
         .netmask((255, 255, 255, 255))
         .destination((10, 2, 0, 2))
+        .mtu(1440)
         .up();
 
     let dev = tun::create_as_async(&config).unwrap();

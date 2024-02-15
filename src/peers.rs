@@ -30,7 +30,7 @@ pub struct Peers {
 
 impl Peers {
     pub fn new(private_key: StaticSecret) -> Self {
-        let mut refresh_interval = time::interval(Duration::from_millis(250));
+        let mut refresh_interval = time::interval(Duration::from_millis(2500));
         refresh_interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
         Self {
@@ -76,6 +76,7 @@ impl Stream for Peers {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut buf = BytesMut::zeroed(MAX_UDP_SIZE);
+
         if self.refresh_interval.poll_tick(cx).is_ready() {
             for peer in self.peers.values() {
                 let mut p = peer.lock();
@@ -116,9 +117,6 @@ impl Sink<Packet> for Peers {
     }
 
     fn start_send(self: Pin<&mut Self>, pkt: Packet) -> Result<(), Self::Error> {
-        // Skip first bytes:
-        // println!("peers: packet write {:?}", pkt.get_bytes());
-
         let mut peer = match self
             .peers_by_ip
             .longest_match(pkt.get_dst_address())
@@ -143,72 +141,3 @@ impl Sink<Packet> for Peers {
         Poll::Ready(Ok(()))
     }
 }
-
-// impl AsyncRead for Peers {
-//     fn poll_read(
-//         mut self: Pin<&mut Self>,
-//         cx: &mut Context<'_>,
-//         buf: &mut [u8],
-//     ) -> Poll<std::io::Result<usize>> {
-//         loop {
-//             if self.refresh_interval.poll_tick(cx).is_ready() {
-//                 for peer in self.peers.values() {
-//                     let mut p = peer.lock();
-//                     p.update_timers();
-//                 }
-//                 continue;
-//             }
-
-//             for peer in self.peers.values() {
-//                 let mut peer = peer.lock();
-
-//                 match peer.poll_recv(cx, buf) {
-//                     Poll::Ready(pkt) => return Poll::Ready(Ok(pkt.len())),
-//                     Poll::Pending => continue,
-//                 };
-//             }
-
-//             return Poll::Pending;
-//         }
-//     }
-// }
-
-// impl AsyncWrite for Peers {
-//     fn poll_write(
-//         self: Pin<&mut Self>,
-//         cx: &mut Context<'_>,
-//         buf: &[u8],
-//     ) -> Poll<std::io::Result<usize>> {
-//         // Skip first bytes:
-//         println!("peers: packet write {:?}", buf);
-
-//         let address = match Tunn::dst_address(buf) {
-//             Some(addr) => addr,
-//             // Not a valid packet:
-//             None => {
-//                 eprintln!("peers: received an invalid packet");
-//                 return Poll::Ready(Ok(buf.len()))
-//             },
-//         };
-
-//         let mut peer = match self.peers_by_ip.longest_match(address).map(|(_, d)| d) {
-//             Some(peer) => peer.lock(),
-//             None => {
-//                 eprintln!("peers: received a packet for an unknown peer");
-//                 return Poll::Ready(Ok(buf.len()))
-//             },
-//         };
-//         peer.encapsulate(buf);
-
-//         return Poll::Ready(Ok(buf.len()))
-//     }
-
-//     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-//         Poll::Ready(Ok(()))
-//     }
-
-//     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-//         eprintln!("requested close");
-//         Poll::Ready(Ok(()))
-//     }
-// }
