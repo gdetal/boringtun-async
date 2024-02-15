@@ -30,7 +30,7 @@ pub struct Peers {
 
 impl Peers {
     pub fn new(private_key: StaticSecret) -> Self {
-        let mut refresh_interval = time::interval(Duration::from_millis(2500));
+        let mut refresh_interval = time::interval(Duration::from_millis(250));
         refresh_interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
         Self {
@@ -117,6 +117,8 @@ impl Sink<Packet> for Peers {
     }
 
     fn start_send(self: Pin<&mut Self>, pkt: Packet) -> Result<(), Self::Error> {
+        println!("send to {}", pkt.get_dst_address());
+
         let mut peer = match self
             .peers_by_ip
             .longest_match(pkt.get_dst_address())
