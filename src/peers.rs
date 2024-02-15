@@ -117,8 +117,6 @@ impl Sink<Packet> for Peers {
     }
 
     fn start_send(self: Pin<&mut Self>, pkt: Packet) -> Result<(), Self::Error> {
-        println!("send to {}", pkt.get_dst_address());
-
         let mut peer = match self
             .peers_by_ip
             .longest_match(pkt.get_dst_address())
@@ -130,6 +128,9 @@ impl Sink<Packet> for Peers {
                 return Ok(());
             }
         };
+
+        println!("send to {}", pkt.get_dst_address());
+
         peer.encapsulate(pkt.get_bytes());
 
         Ok(())
