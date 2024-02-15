@@ -30,5 +30,4 @@ features = ["codec"]
 tun = { version = "0.6.1", features = ["async"] }
 tokio = { version = "1.36.0", features = ["full"] }
 base64 = "0.21.7"
-default-net = "0.21.0"
 net-route = "0.2.11"

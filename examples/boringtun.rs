@@ -44,30 +44,33 @@ async fn main() {
     let mut config = tun::Configuration::default();
 
     config
-        .platform(|config| {
-            #[cfg(target_os = "linux")]
-            config.packet_information(true);
-        })
         .name("utun42")
         .address((10, 2, 0, 2))
         .netmask((255, 255, 255, 255))
-        .destination((10, 2, 0, 2))
         .mtu(1440)
         .up();
 
+    #[cfg(target_os = "linux")]
+    let config = config.platform(|config| {
+        config.packet_information(true);
+    });
+
+    #[cfg(not(target_os = "windows"))]
+    let config = config.destination((10, 2, 0, 2));
+
     let dev = tun::create_as_async(&config).unwrap();
 
-    let ifindex = default_net::interface::get_interfaces()
-        .iter()
-        .find(|e| e.name == "utun42")
-        .unwrap()
-        .index;
-
     let handle = net_route::Handle::new().unwrap();
-    let route = net_route::Route::new("146.59.195.115".parse().unwrap(), 32).with_ifindex(ifindex);
+    let route = net_route::Route::new("146.59.195.115".parse().unwrap(), 32).with_gateway("10.2.0.2".parse().unwrap());
     handle.add(&route).await.unwrap();
 
-    let dev = Device::new(Compat::new(dev), true, 1512);
+    #[cfg(target_os = "windows")]
+    let has_pi = false;
+
+    #[cfg(not(target_os = "windows"))]
+    let has_pi = true;
+
+    let dev = Device::new(Compat::new(dev), has_pi, 1512);
 
     let private_key = "aCyyrK5JeEPNkCs4fm92YcYnefQSvekUeJUGl1Kh5UE="
         .parse::<KeyBytes>()
