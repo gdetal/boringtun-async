@@ -53,11 +53,7 @@ impl Decoder for TunPacketCodec {
         let pkt: BytesMut = buf.split_to(len);
 
         // reserve enough space for the next packet
-        if self.has_packet_info {
-            buf.reserve(self.pkt_size + PACKET_INFO_SIZE);
-        } else {
-            buf.reserve(self.pkt_size);
-        }
+        buf.reserve(crate::MAX_UDP_SIZE);
 
         Ok(Packet::parse(pkt))
     }
