@@ -29,7 +29,8 @@ version = "0.7"
 features = ["codec"]
 
 [dev-dependencies]
-tun = { version = "0.6.1", features = ["async"] }
+# last version of tun fixes a performance issue on windows:
+tun = { git = "https://github.com/meh/rust-tun.git", features = ["async"] }
 tokio = { version = "1.36.0", features = ["full"] }
 base64 = "0.21.7"
 net-route = "0.2.11"
