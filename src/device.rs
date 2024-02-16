@@ -4,7 +4,7 @@ use std::{
 };
 
 use async_compat::Compat;
-use futures::{ready, AsyncRead, AsyncWrite, Sink, Stream};
+use futures::{AsyncRead, AsyncWrite, Sink, Stream};
 use pin_project::pin_project;
 use tokio_util::codec::Framed;
 
@@ -14,8 +14,6 @@ use crate::{codec::TunPacketCodec, packet::Packet};
 pub struct Device<D> {
     #[pin]
     inner: Framed<Compat<D>, TunPacketCodec>,
-
-    last_sent: std::time::Instant,
 }
 
 impl<D> Device<D>
@@ -32,7 +30,6 @@ where
 
         Self {
             inner,
-            last_sent: std::time::Instant::now(),
         }
     }
 }
@@ -44,14 +41,7 @@ where
     type Item = Result<Packet, std::io::Error>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-
-        let item = ready!(this.inner.poll_next(cx));
-
-        println!("> {:?}", std::time::Instant::now());
-        *this.last_sent = std::time::Instant::now();
-
-        Poll::Ready(item)
+        self.project().inner.poll_next(cx)
     }
 }
 
@@ -66,12 +56,7 @@ where
     }
 
     fn start_send(self: Pin<&mut Self>, pkt: Packet) -> Result<(), Self::Error> {
-        let this = self.project();
-        println!("< {:?}", std::time::Instant::now());
-
-        println!("delay {:?}", this.last_sent.elapsed());
-
-        this.inner.start_send(pkt)
+        self.project().inner.start_send(pkt)
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
