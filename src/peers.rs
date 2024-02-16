@@ -117,7 +117,7 @@ impl Peers {
                     Poll::Pending
                 }
                 Some(pkt) => {
-                    eprintln!("pkt -> {}", pkt.len());
+                    // eprintln!("pkt -> {}", pkt.len());
                     Poll::Ready(Some(Ok(pkt)))
                 }
             };
@@ -161,7 +161,7 @@ impl Sink<Packet> for Peers {
 
         let (_, peer) = self.peers.get_index_mut(index).unwrap();
 
-        println!("send to {}", pkt.get_dst_address());
+        // println!("send to {}", pkt.get_dst_address());
 
         // TODO check whether peer endpoint is connected and write to "Listener" in that case:
         peer.encapsulate(pkt.get_bytes());

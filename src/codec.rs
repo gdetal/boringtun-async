@@ -1,4 +1,5 @@
 use byteorder::{NativeEndian, NetworkEndian, WriteBytesExt};
+use etherparse::IpHeaders;
 use tokio_util::{
     bytes::{BufMut, BytesMut},
     codec::{Decoder, Encoder},
@@ -32,7 +33,24 @@ impl Decoder for TunPacketCodec {
             return Ok(None);
         }
 
-        let mut pkt: BytesMut = buf.split_to(buf.len());
+        // if the packet information is enabled we have to ignore the first 4 bytes
+        if self.has_packet_info {
+            let _ = buf.split_to(PACKET_INFO_SIZE);
+        }
+
+        // Packets could be buffered, split them based on IP header info:
+        let len = match IpHeaders::from_slice_lax(buf) {
+            Err(e) => {
+                eprintln!("bad packet received: {e}");
+                // Don't know the packet size -> flush all buffer:
+                buf.len()
+            }
+            Ok((IpHeaders::Ipv4(h, _), _, _)) => h.total_len as usize,
+            Ok((IpHeaders::Ipv6(h, _), _, _)) => h.header_len() + h.payload_length as usize,
+        };
+
+        // Retrieve packet from buffer:
+        let pkt: BytesMut = buf.split_to(len);
 
         // reserve enough space for the next packet
         if self.has_packet_info {
@@ -40,13 +58,6 @@ impl Decoder for TunPacketCodec {
         } else {
             buf.reserve(self.pkt_size);
         }
-
-        // if the packet information is enabled we have to ignore the first 4 bytes
-        if self.has_packet_info {
-            let _ = pkt.split_to(PACKET_INFO_SIZE);
-        }
-
-        // println!("decode tun packet -> {:?}", pkt);
 
         Ok(Packet::parse(pkt))
     }

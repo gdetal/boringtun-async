@@ -48,6 +48,8 @@ impl Peer {
         )
         .unwrap();
         udp_conn.set_reuse_address(true).unwrap();
+
+        #[cfg(not(target_os = "windows"))]
         udp_conn.set_reuse_port(true).unwrap();
         let bind_addr = if endpoint.is_ipv4() {
             SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into()
@@ -88,8 +90,7 @@ impl Peer {
             }
             TunnResult::Err(e) => eprintln!("encapsulate error: {e:?}"),
             TunnResult::WriteToNetwork(packet) => {
-                println!("peer send {:?}", self.conn.try_send(packet));
-                // .ok();
+                self.conn.try_send(packet).ok();
             }
             _ => panic!("Unexpected result from encapsulate"),
         }
@@ -119,7 +120,7 @@ impl Peer {
             }
             TunnResult::WriteToTunnelV4(packet, addr) => {
                 if this.allowed_ips.longest_match(addr).is_some() {
-                    println!("peer ready packet");
+                    // println!("peer ready packet");
                     return Poll::Ready(packet);
                 }
             }
@@ -199,7 +200,7 @@ impl Peer {
             }
             TunnResult::WriteToTunnelV4(packet, addr) => {
                 if this.allowed_ips.longest_match(addr).is_some() {
-                    println!("peer ready packet");
+                    // println!("peer ready packet");
                     return Poll::Ready(packet);
                 }
             }
@@ -240,7 +241,7 @@ impl Stream for Peer {
                 Poll::Pending
             }
             Some(pkt) => {
-                eprintln!("pkt -> {}", pkt.len());
+                // eprintln!("pkt -> {}", pkt.len());
                 Poll::Ready(Some(Ok(pkt)))
             }
         }
