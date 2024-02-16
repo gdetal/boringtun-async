@@ -28,9 +28,7 @@ where
         // Make sure to flush as soon as one packet is in the buffer:
         inner.set_backpressure_boundary(0);
 
-        Self {
-            inner,
-        }
+        Self { inner }
     }
 }
 

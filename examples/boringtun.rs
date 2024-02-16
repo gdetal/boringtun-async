@@ -60,7 +60,6 @@ async fn main() {
 
     let dev = tun::create_as_async(&config).unwrap();
 
-
     #[cfg(not(target_os = "windows"))]
     {
         let handle = net_route::Handle::new().unwrap();

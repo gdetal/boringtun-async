@@ -14,11 +14,11 @@ impl<D> Tunnel<D>
 where
     D: Stream + Sink<Packet>,
 {
-    pub fn new(private_key: StaticSecret, device: D) -> Self {
-        Self {
+    pub fn new(private_key: StaticSecret, device: D) -> std::io::Result<Self> {
+        Ok(Self {
             device,
-            peers: Peers::new(private_key),
-        }
+            peers: Peers::new(private_key, 0)?,
+        })
     }
 
     pub fn add_peer(
