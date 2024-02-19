@@ -74,7 +74,7 @@ async fn main() {
     #[cfg(not(target_os = "windows"))]
     let has_pi = true;
 
-    let dev = Device::new(Compat::new(dev), has_pi, 1512);
+    let dev = Device::new(Compat::new(dev), has_pi);
 
     let private_key = "aCyyrK5JeEPNkCs4fm92YcYnefQSvekUeJUGl1Kh5UE="
         .parse::<KeyBytes>()
@@ -87,11 +87,13 @@ async fn main() {
     let peer_endpoint = "195.181.167.193:51820".parse().unwrap();
     let allowed_ips = vec![IpNetwork::from_str_truncate("0.0.0.0/0").unwrap()];
 
-    tunnel.add_peer(
-        PublicKey::from(peer_public_key.0),
-        peer_endpoint,
-        &allowed_ips,
-    );
+    tunnel
+        .add_peer(
+            PublicKey::from(peer_public_key.0),
+            peer_endpoint,
+            &allowed_ips,
+        )
+        .unwrap();
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},

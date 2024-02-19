@@ -1,6 +1,7 @@
 use std::{
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
@@ -21,11 +22,28 @@ use tokio_util::bytes::BytesMut;
 
 use crate::{packet::Packet, MAX_UDP_SIZE};
 
+pub struct Endpoint {
+    addr: SocketAddr,
+    sock: Option<UdpSocket>,
+    raw_sock: Arc<UdpSocket>,
+}
+
+impl Endpoint {
+    fn try_send(&self, pkt: &[u8]) -> std::io::Result<()> {
+        let sock = self.sock.as_ref().unwrap_or(self.raw_sock.as_ref());
+        if self.sock.is_some() {
+            sock.try_send(pkt)?;
+        } else {
+            sock.try_send_to(pkt, self.addr)?;
+        }
+        Ok(())
+    }
+}
+
 #[pin_project]
 pub struct Peer {
     tunnel: Tunn,
-    endpoint: SocketAddr,
-    conn: UdpSocket,
+    endpoint: Endpoint,
     allowed_ips: IpNetworkTable<()>,
     update_interval: time::Interval,
     buffer: [u8; MAX_UDP_SIZE],
@@ -37,33 +55,9 @@ impl Peer {
         private_key: StaticSecret,
         public_key: PublicKey,
         endpoint: SocketAddr,
-        port: u16,
+        raw_sock: Arc<UdpSocket>,
         allowed_ips: &[IpNetwork],
     ) -> Self {
-        // TODO handle error:
-        let udp_conn = socket2::Socket::new(
-            socket2::Domain::for_address(endpoint),
-            socket2::Type::DGRAM,
-            Some(socket2::Protocol::UDP),
-        )
-        .unwrap();
-        udp_conn.set_reuse_address(true).unwrap();
-
-        #[cfg(not(target_os = "windows"))]
-        udp_conn.set_reuse_port(true).unwrap();
-        let bind_addr = if endpoint.is_ipv4() {
-            SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into()
-        } else {
-            SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into()
-        };
-
-        udp_conn.bind(&bind_addr).unwrap();
-        udp_conn.connect(&endpoint.into()).unwrap();
-        udp_conn.set_nonblocking(true).unwrap();
-
-        let udp_conn = std::net::UdpSocket::from(udp_conn);
-        let conn = UdpSocket::from_std(udp_conn).unwrap();
-
         let mut allowed_ips_set = IpNetworkTable::new();
 
         for ips in allowed_ips {
@@ -74,23 +68,69 @@ impl Peer {
         update_interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
         Self {
-            endpoint,
             tunnel: Tunn::new(private_key, public_key, None, None, index, None).unwrap(),
-            conn,
+            endpoint: Endpoint {
+                addr: endpoint,
+                sock: None,
+                raw_sock,
+            },
             allowed_ips: allowed_ips_set,
             update_interval,
             buffer: [0; MAX_UDP_SIZE],
         }
     }
 
+    pub(crate) fn set_endpoint(&mut self, addr: SocketAddr) {
+        if self.endpoint.addr != addr {
+            self.endpoint.sock.take();
+        }
+
+        self.endpoint.addr = addr;
+    }
+
+    pub(crate) fn connect_endpoint(&mut self, port: u16) -> std::io::Result<()> {
+        if self.endpoint.sock.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "already connected",
+            ));
+        }
+
+        let udp_conn = socket2::Socket::new(
+            socket2::Domain::for_address(self.endpoint.addr),
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )?;
+        udp_conn.set_reuse_address(true)?;
+
+        #[cfg(not(target_os = "windows"))]
+        udp_conn.set_reuse_port(true)?;
+        let bind_addr = if self.endpoint.addr.is_ipv4() {
+            SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into()
+        } else {
+            SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into()
+        };
+
+        udp_conn.bind(&bind_addr)?;
+        udp_conn.connect(&self.endpoint.addr.into())?;
+        udp_conn.set_nonblocking(true)?;
+
+        let udp_conn = std::net::UdpSocket::from(udp_conn);
+        let conn = UdpSocket::from_std(udp_conn)?;
+
+        self.endpoint.sock = Some(conn);
+
+        Ok(())
+    }
+
     pub(crate) fn encapsulate(&mut self, pkt: &[u8]) {
         match self.tunnel.encapsulate(pkt, &mut self.buffer) {
-            TunnResult::Done => {
-                println!("peer done")
+            TunnResult::Done => {}
+            TunnResult::Err(e) => {
+                eprintln!("encapsulate error: {e:?}")
             }
-            TunnResult::Err(e) => eprintln!("encapsulate error: {e:?}"),
             TunnResult::WriteToNetwork(packet) => {
-                self.conn.try_send(packet).ok();
+                self.endpoint.try_send(packet).ok();
             }
             _ => panic!("Unexpected result from encapsulate"),
         }
@@ -106,21 +146,16 @@ impl Peer {
         let mut flush = false;
         match this
             .tunnel
-            .decapsulate(Some(this.endpoint.ip()), packet, &mut dst_buf[..])
+            .decapsulate(Some(this.endpoint.addr.ip()), packet, &mut dst_buf[..])
         {
-            TunnResult::Done => {
-                println!("peer done");
-            }
+            TunnResult::Done => {}
             TunnResult::Err(e) => eprintln!("decapsulate error {:?}", e),
             TunnResult::WriteToNetwork(packet) => {
                 flush = true;
-                println!("peer write to network");
-
-                this.conn.try_send(packet).ok();
+                this.endpoint.try_send(packet).ok();
             }
             TunnResult::WriteToTunnelV4(packet, addr) => {
                 if this.allowed_ips.longest_match(addr).is_some() {
-                    // println!("peer ready packet");
                     return Poll::Ready(packet);
                 }
             }
@@ -136,8 +171,7 @@ impl Peer {
             while let TunnResult::WriteToNetwork(packet) =
                 this.tunnel.decapsulate(None, &[], this.buffer)
             {
-                println!("peer flush packet: {packet:?}");
-                this.conn.try_send(packet).ok();
+                this.endpoint.try_send(packet).ok();
             }
         }
         Poll::Pending
@@ -147,94 +181,53 @@ impl Peer {
         match self.tunnel.update_timers(&mut self.buffer) {
             TunnResult::Done => {}
             TunnResult::Err(WireGuardError::ConnectionExpired) => {
-                // Should close connection:
-                println!("connection expired")
+                self.endpoint.sock.take();
             }
             TunnResult::Err(e) => {
                 eprintln!("update_timers error: {e:?}")
             }
             TunnResult::WriteToNetwork(packet) => {
-                self.conn.try_send(packet).ok();
+                self.endpoint.try_send(packet).ok();
             }
             _ => panic!("Unexpected result from update_timers"),
         }
     }
 
-    fn poll_recv<'a>(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        dst_buf: &'a mut [u8],
-    ) -> Poll<&'a mut [u8]> {
-        let this = self.project();
+    fn poll_recv(&mut self, cx: &mut Context<'_>, buf: &mut BytesMut) -> Poll<usize> {
+        let mut read_buf = ReadBuf::new(buf);
 
-        let mut buf = ReadBuf::new(this.buffer);
-
-        let packet = match this.conn.poll_recv(cx, &mut buf) {
-            Poll::Ready(Ok(_)) => buf.filled(),
-            Poll::Ready(Err(e)) => {
-                // TODO close conn ??
-                eprintln!("unable to receive packets: {e}");
-                return Poll::Pending;
-            }
-            Poll::Pending => {
-                return Poll::Pending;
-            }
-        };
-
-        // TODO avoid duplication with decapsulate().
-
-        let mut flush = false;
-        match this
-            .tunnel
-            .decapsulate(Some(this.endpoint.ip()), packet, &mut dst_buf[..])
-        {
-            TunnResult::Done => {
-                println!("peer done");
-            }
-            TunnResult::Err(e) => eprintln!("decapsulate error {:?}", e),
-            TunnResult::WriteToNetwork(packet) => {
-                flush = true;
-                println!("peer write to network");
-
-                this.conn.try_send(packet).ok();
-            }
-            TunnResult::WriteToTunnelV4(packet, addr) => {
-                if this.allowed_ips.longest_match(addr).is_some() {
-                    // println!("peer ready packet");
-                    return Poll::Ready(packet);
+        if let Some(ref conn) = self.endpoint.sock {
+            return match conn.poll_recv(cx, &mut read_buf) {
+                Poll::Ready(Ok(_)) => Poll::Ready(read_buf.filled().len()),
+                Poll::Ready(Err(e)) => {
+                    eprintln!("unable to receive packets: {e}");
+                    self.endpoint.sock.take();
+                    Poll::Pending
                 }
-            }
-            TunnResult::WriteToTunnelV6(packet, addr) => {
-                if this.allowed_ips.longest_match(addr).is_some() {
-                    return Poll::Ready(packet);
-                }
-            }
+                Poll::Pending => Poll::Pending,
+            };
         }
 
-        if flush {
-            // Flush pending queue
-            while let TunnResult::WriteToNetwork(packet) =
-                this.tunnel.decapsulate(None, &[], this.buffer)
-            {
-                println!("peer flush packet: {packet:?}");
-                this.conn.try_send(packet).ok();
-            }
-        }
         Poll::Pending
     }
 }
+
+use std::ops::DerefMut;
 
 impl Stream for Peer {
     type Item = Result<Packet, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut buf = BytesMut::zeroed(MAX_UDP_SIZE);
+        let mut read_buf = BytesMut::zeroed(MAX_UDP_SIZE);
 
         if self.update_interval.poll_tick(cx).is_ready() {
             self.update_timers();
         }
 
-        let len = ready!(self.poll_recv(cx, &mut buf)).len();
+        let len = ready!(self.deref_mut().poll_recv(cx, &mut read_buf));
+
+        let len = ready!(self.decapsulate(read_buf.split_to(len).as_ref(), &mut buf)).len();
         match Packet::parse(buf.split_to(len)) {
             None => {
                 eprintln!("unable to parse receive packet");
@@ -270,82 +263,61 @@ impl Sink<Packet> for Peer {
 }
 
 #[pin_project]
-pub(crate) struct PeerListener {
+struct PeerSocketInner {
     private_key: StaticSecret,
     public_key: PublicKey,
     rate_limiter: RateLimiter,
     reset_interval: time::Interval,
-    sock: Option<UdpSocket>,
+    sock: Arc<UdpSocket>,
+    port: u16,
     buffer: [u8; MAX_UDP_SIZE],
 }
 
-impl PeerListener {
-    pub(crate) fn new(private_key: StaticSecret) -> Self {
+impl PeerSocketInner {
+    pub(crate) fn bind(private_key: StaticSecret, addr: SocketAddr) -> std::io::Result<Self> {
         let public_key = PublicKey::from(&private_key);
         let rate_limiter = RateLimiter::new(&public_key, 100);
 
-        Self {
+        let sock = socket2::Socket::new(
+            socket2::Domain::for_address(addr),
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )?;
+
+        sock.set_reuse_address(true)?;
+        let bind_addr = addr.into();
+        sock.bind(&bind_addr)?;
+        sock.set_nonblocking(true)?;
+
+        let sock = std::net::UdpSocket::from(sock);
+        let sock = Arc::new(UdpSocket::from_std(sock)?);
+
+        let port = sock.local_addr()?.port();
+
+        Ok(Self {
             private_key,
             public_key,
             rate_limiter,
             reset_interval: time::interval(Duration::from_secs(1)),
-            sock: None,
+            sock,
+            port,
             buffer: [0; MAX_UDP_SIZE],
-        }
+        })
     }
 
-    pub(crate) fn listen_v4(&mut self, mut port: u16) -> std::io::Result<u16> {
-        let sock = socket2::Socket::new(
-            socket2::Domain::IPV4,
-            socket2::Type::DGRAM,
-            Some(socket2::Protocol::UDP),
-        )?;
-        sock.set_reuse_address(true)?;
-        sock.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
-        sock.set_nonblocking(true)?;
-
-        if port == 0 {
-            // Random port was assigned
-            port = sock.local_addr()?.as_socket().unwrap().port();
-        }
-
-        let sock = std::net::UdpSocket::from(sock);
-        let sock = UdpSocket::from_std(sock).unwrap();
-
-        self.sock = Some(sock);
-        Ok(port)
-    }
-
-    pub(crate) fn listen_v6(&mut self, mut port: u16) -> std::io::Result<u16> {
-        let sock = socket2::Socket::new(
-            socket2::Domain::IPV6,
-            socket2::Type::DGRAM,
-            Some(socket2::Protocol::UDP),
-        )?;
-        sock.set_reuse_address(true)?;
-        sock.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())?;
-        sock.set_nonblocking(true)?;
-
-        if port == 0 {
-            // Random port was assigned
-            port = sock.local_addr()?.as_socket().unwrap().port();
-        }
-
-        let sock = std::net::UdpSocket::from(sock);
-        let sock = UdpSocket::from_std(sock).unwrap();
-
-        self.sock = Some(sock);
-        Ok(port)
+    pub(crate) fn port(&mut self) -> u16 {
+        self.port
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum PeerId {
     PublicKey(PublicKey),
     Index(usize),
 }
 
-impl Stream for PeerListener {
-    type Item = std::io::Result<(PeerId, Packet)>;
+impl Stream for PeerSocketInner {
+    type Item = std::io::Result<(PeerId, BytesMut, SocketAddr)>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut dst_buf_mut = BytesMut::zeroed(MAX_UDP_SIZE);
@@ -359,13 +331,9 @@ impl Stream for PeerListener {
             this.rate_limiter.reset_count();
         }
 
-        let sock = match this.sock {
-            None => return Poll::Pending,
-            Some(sock) => sock,
-        };
+        let addr = ready!(this.sock.poll_recv_from(cx, &mut dst_buf))?;
 
-        let addr = ready!(sock.poll_recv_from(cx, &mut dst_buf))?;
-
+        let len = dst_buf.filled().len();
         let parsed_packet =
             match this
                 .rate_limiter
@@ -373,7 +341,7 @@ impl Stream for PeerListener {
             {
                 Ok(packet) => packet,
                 Err(TunnResult::WriteToNetwork(cookie)) => {
-                    sock.try_send_to(cookie, addr).ok();
+                    this.sock.try_send_to(cookie, addr).ok();
                     return Poll::Pending;
                 }
                 Err(_) => return Poll::Pending,
@@ -399,32 +367,32 @@ impl Stream for PeerListener {
             Some(peer) => peer,
         };
 
-        let packet = match Packet::parse(dst_buf_mut) {
-            Some(packet) => packet,
-            None => return Poll::Pending,
-        };
-
-        Poll::Ready(Some(Ok((peer, packet))))
+        Poll::Ready(Some(Ok((peer, dst_buf_mut.split_to(len), addr))))
     }
 }
 
 #[pin_project]
-pub(crate) struct PeerListeners {
+pub(crate) struct PeerSocket {
     #[pin]
-    v4: PeerListener,
+    v4: PeerSocketInner,
     #[pin]
-    v6: PeerListener,
+    v6: PeerSocketInner,
     pub(crate) port: u16,
     v4_first: bool,
 }
 
-impl PeerListeners {
+impl PeerSocket {
     pub(crate) fn new(private_key: StaticSecret, port: u16) -> std::io::Result<Self> {
-        let mut v4: PeerListener = PeerListener::new(private_key.clone());
-        let port = v4.listen_v4(port)?;
+        let mut v4 = PeerSocketInner::bind(
+            private_key.clone(),
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)),
+        )?;
+        let port = v4.port();
 
-        let mut v6 = PeerListener::new(private_key);
-        v6.listen_v6(port)?;
+        let v6 = PeerSocketInner::bind(
+            private_key,
+            SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0)),
+        )?;
 
         Ok(Self {
             v4,
@@ -433,10 +401,17 @@ impl PeerListeners {
             v4_first: true,
         })
     }
+
+    pub(crate) fn udpsock_for(&self, addr: SocketAddr) -> Arc<UdpSocket> {
+        match addr {
+            SocketAddr::V4(_) => self.v4.sock.clone(),
+            SocketAddr::V6(_) => self.v6.sock.clone(),
+        }
+    }
 }
 
-impl Stream for PeerListeners {
-    type Item = std::io::Result<(PeerId, Packet)>;
+impl Stream for PeerSocket {
+    type Item = std::io::Result<(PeerId, BytesMut, SocketAddr)>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();

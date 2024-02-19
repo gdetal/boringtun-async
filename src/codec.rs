@@ -11,14 +11,14 @@ const PACKET_INFO_SIZE: usize = 4;
 
 pub(crate) struct TunPacketCodec {
     has_packet_info: bool,
-    pkt_size: usize,
+    buffer_size: usize,
 }
 
 impl TunPacketCodec {
-    pub(crate) fn new(has_packet_info: bool, pkt_size: usize) -> Self {
+    pub(crate) fn new(has_packet_info: bool, buffer_size: usize) -> Self {
         Self {
             has_packet_info,
-            pkt_size,
+            buffer_size,
         }
     }
 }
@@ -53,7 +53,7 @@ impl Decoder for TunPacketCodec {
         let pkt: BytesMut = buf.split_to(len);
 
         // reserve enough space for the next packet
-        buf.reserve(crate::MAX_UDP_SIZE);
+        buf.reserve(self.buffer_size);
 
         Ok(Packet::parse(pkt))
     }

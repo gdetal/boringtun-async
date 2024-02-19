@@ -13,7 +13,7 @@ use tokio_util::bytes::BytesMut;
 
 use crate::{
     packet::Packet,
-    peer::{Peer, PeerId, PeerListeners},
+    peer::{Peer, PeerId, PeerSocket},
     MAX_UDP_SIZE,
 };
 
@@ -23,19 +23,19 @@ pub struct Peers {
     peers: IndexMap<PublicKey, Peer>,
     peers_by_ip: IpNetworkTable<usize>,
     listen_port: u16,
-    listeners: Option<PeerListeners>,
+    peers_socket: PeerSocket,
 }
 
 impl Peers {
     pub fn new(private_key: StaticSecret, port: u16) -> std::io::Result<Self> {
-        let listeners = PeerListeners::new(private_key.clone(), port)?;
+        let peers_socket = PeerSocket::new(private_key.clone(), port)?;
 
         Ok(Self {
             private_key,
             peers: Default::default(),
             peers_by_ip: IpNetworkTable::new(),
             listen_port: port,
-            listeners: Some(listeners),
+            peers_socket,
         })
     }
 
@@ -44,7 +44,7 @@ impl Peers {
         public_key: PublicKey,
         endpoint: SocketAddr,
         allowed_ips: &[ip_network::IpNetwork],
-    ) {
+    ) -> std::io::Result<()> {
         // TODO fix index:
         let index = 0;
 
@@ -53,7 +53,7 @@ impl Peers {
             self.private_key.clone(),
             public_key,
             endpoint,
-            self.listen_port,
+            self.peers_socket.udpsock_for(endpoint),
             allowed_ips,
         );
 
@@ -62,6 +62,8 @@ impl Peers {
         for ips in allowed_ips {
             self.peers_by_ip.insert(*ips, idx);
         }
+
+        Ok(())
     }
 
     pub(crate) fn poll_peers_next(
@@ -90,40 +92,42 @@ impl Peers {
     ) -> Poll<Option<std::io::Result<Packet>>> {
         let this = self.project();
 
-        if let Some(listeners) = this.listeners {
-            let peer_packet = ready!(Pin::new(listeners).poll_next(cx));
-            let (peer, packet) = match peer_packet {
-                Some(Err(e)) => return Poll::Ready(Some(Err(e))),
-                None => return Poll::Ready(None),
-                Some(Ok(p)) => p,
-            };
+        let peer_packet = ready!(Pin::new(this.peers_socket).poll_next(cx));
+        let (peer, packet, addr) = match peer_packet {
+            Some(Err(e)) => return Poll::Ready(Some(Err(e))),
+            None => return Poll::Ready(None),
+            Some(Ok(p)) => p,
+        };
 
-            let peer = match peer {
-                PeerId::Index(index) => this.peers.get_index_mut(index).map(|(_, p)| p),
-                PeerId::PublicKey(key) => this.peers.get_mut(&key),
-            };
+        let peer = match peer {
+            PeerId::Index(index) => this.peers.get_index_mut(index).map(|(_, p)| p),
+            PeerId::PublicKey(key) => this.peers.get_mut(&key),
+        };
 
-            let peer = match peer {
-                None => return Poll::Pending,
-                Some(peer) => peer,
-            };
+        let mut peer = match peer {
+            None => return Poll::Pending,
+            Some(peer) => Pin::new(peer),
+        };
 
-            let mut buf = BytesMut::zeroed(MAX_UDP_SIZE);
+        let mut buf = BytesMut::zeroed(MAX_UDP_SIZE);
 
-            let len = ready!(Pin::new(peer).decapsulate(packet.get_bytes(), &mut buf)).len();
-            return match Packet::parse(buf.split_to(len)) {
-                None => {
-                    eprintln!("unable to parse receive packet");
-                    Poll::Pending
+        let len = ready!(peer.as_mut().decapsulate(packet.as_ref(), &mut buf)).len();
+        let buf = buf.split_to(len);
+
+        match Packet::parse(buf) {
+            None => {
+                eprintln!("unable to parse receive packet");
+                Poll::Pending
+            }
+            Some(pkt) => {
+                peer.set_endpoint(addr);
+                if let Err(e) = peer.connect_endpoint(*this.listen_port) {
+                    eprintln!("unable to connect peer endpoint: {e}");
                 }
-                Some(pkt) => {
-                    // eprintln!("pkt -> {}", pkt.len());
-                    Poll::Ready(Some(Ok(pkt)))
-                }
-            };
+
+                Poll::Ready(Some(Ok(pkt)))
+            }
         }
-
-        Poll::Pending
     }
 }
 
@@ -146,8 +150,10 @@ impl Sink<Packet> for Peers {
         Poll::Ready(Ok(()))
     }
 
-    fn start_send(mut self: Pin<&mut Self>, pkt: Packet) -> Result<(), Self::Error> {
-        let index = match self
+    fn start_send(self: Pin<&mut Self>, pkt: Packet) -> Result<(), Self::Error> {
+        let this = self.project();
+
+        let index = match this
             .peers_by_ip
             .longest_match(pkt.get_dst_address())
             .map(|(_, d)| *d)
@@ -159,11 +165,7 @@ impl Sink<Packet> for Peers {
             }
         };
 
-        let (_, peer) = self.peers.get_index_mut(index).unwrap();
-
-        // println!("send to {}", pkt.get_dst_address());
-
-        // TODO check whether peer endpoint is connected and write to "Listener" in that case:
+        let (_, peer) = this.peers.get_index_mut(index).unwrap();
         peer.encapsulate(pkt.get_bytes());
 
         Ok(())

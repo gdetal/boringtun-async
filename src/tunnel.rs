@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, pin::Pin};
+use std::net::SocketAddr;
 
 use boringtun::x25519::{PublicKey, StaticSecret};
 use futures::{Sink, Stream, StreamExt};
@@ -26,10 +26,8 @@ where
         public_key: PublicKey,
         endpoint: SocketAddr,
         allowed_ips: &[ip_network::IpNetwork],
-    ) {
-        Pin::new(&mut self.peers)
-            .get_mut()
-            .add_peer(public_key, endpoint, allowed_ips)
+    ) -> std::io::Result<()> {
+        self.peers.add_peer(public_key, endpoint, allowed_ips)
     }
 }
 

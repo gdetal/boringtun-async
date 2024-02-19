@@ -20,10 +20,10 @@ impl<D> Device<D>
 where
     D: AsyncRead + AsyncWrite,
 {
-    pub fn new(device: D, has_packet_info: bool, pkt_size: usize) -> Self {
+    pub fn new(device: D, has_packet_info: bool) -> Self {
         let mut inner = Framed::new(
             Compat::new(device),
-            TunPacketCodec::new(has_packet_info, pkt_size),
+            TunPacketCodec::new(has_packet_info, crate::MAX_UDP_SIZE),
         );
         // Make sure to flush as soon as one packet is in the buffer:
         inner.set_backpressure_boundary(0);
