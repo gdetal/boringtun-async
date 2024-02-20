@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use boringtun::x25519::PublicKey;
+use boringtun::x25519::{PublicKey, StaticSecret};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -15,12 +15,21 @@ pub enum ApiError {
     ChannelClosed(#[from] oneshot::Canceled),
     #[error("I/O error: {0}")]
     IO(#[from] std::io::Error),
+    #[error("error: {0}")]
+    Other(String),
 }
+
+impl From<&str> for ApiError {
+    fn from(value: &str) -> Self {
+        Self::Other(value.to_owned())
+    }
+} 
 
 pub type ApiResult = Result<(), ApiError>;
 
-#[derive(Debug, Clone)]
 pub(crate) enum ApiMessage {
+    PrivateKey(StaticSecret),
+    ListenPort(u16),
     PeerFlush,
     PeerAdd {
         public_key: PublicKey,
@@ -73,6 +82,18 @@ impl ApiChannel {
         Self(channel)
     }
 
+    pub async fn private_key(&mut self, key: StaticSecret) -> ApiResult {
+        let (req, recv) = ApiRequest::new(ApiMessage::PrivateKey(key));
+        self.0.send(req).await?;
+        recv.await?
+    }
+
+    pub async fn listen_port(&mut self, port: u16) -> ApiResult {
+        let (req, recv) = ApiRequest::new(ApiMessage::ListenPort(port));
+        self.0.send(req).await?;
+        recv.await?
+    }
+
     pub async fn add_peer(
         &mut self,
         public_key: PublicKey,
@@ -84,9 +105,7 @@ impl ApiChannel {
             endpoint,
             allowed_ips,
         });
-        println!("send ->>>");
         self.0.send(req).await?;
-        println!("recv <<<-");
         recv.await?
     }
 

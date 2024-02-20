@@ -2,7 +2,7 @@ extern crate tun;
 
 use async_compat::Compat;
 use boringtun::x25519::{PublicKey, StaticSecret};
-use boringtun_async::{Device, Tunnel};
+use boringtun_async::{Device, TunnelDevice};
 use ip_network::IpNetwork;
 
 struct KeyBytes(pub [u8; 32]);
@@ -76,10 +76,13 @@ async fn main() {
 
     let dev = Device::new(Compat::new(dev), has_pi);
 
+    let tunnel = TunnelDevice::new(dev).unwrap();
+    let tunnel = tunnel.spawn();
+
+
     let private_key = "aCyyrK5JeEPNkCs4fm92YcYnefQSvekUeJUGl1Kh5UE="
-        .parse::<KeyBytes>()
-        .unwrap();
-    let tunnel = Tunnel::new(StaticSecret::from(private_key.0), dev).unwrap();
+    .parse::<KeyBytes>()
+    .unwrap();
 
     let peer_public_key = "MK3425tJbRhEz+1xQLxlL+l6GNl52zKNwo5V0fHEwj4="
         .parse::<KeyBytes>()
@@ -87,7 +90,7 @@ async fn main() {
     let peer_endpoint = "195.181.167.193:51820".parse().unwrap();
     let allowed_ips = vec![IpNetwork::from_str_truncate("0.0.0.0/0").unwrap()];
 
-    let tunnel = tunnel.spawn();
+    tunnel.api().private_key(StaticSecret::from(private_key.0)).await.unwrap();
 
     tunnel
         .api()

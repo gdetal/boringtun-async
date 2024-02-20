@@ -82,10 +82,14 @@ impl Peer {
 
     pub(crate) fn set_endpoint(&mut self, addr: SocketAddr) {
         if self.endpoint.addr != addr {
-            self.endpoint.sock.take();
+            self.shutdown_endpoint();
         }
 
         self.endpoint.addr = addr;
+    }
+
+    pub(crate) fn shutdown_endpoint(&mut self) {
+        self.endpoint.sock.take();
     }
 
     pub(crate) fn connect_endpoint(&mut self, port: u16) -> std::io::Result<()> {
@@ -110,7 +114,6 @@ impl Peer {
         } else {
             SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into()
         };
-
         udp_conn.bind(&bind_addr)?;
         udp_conn.connect(&self.endpoint.addr.into())?;
         udp_conn.set_nonblocking(true)?;
@@ -181,7 +184,7 @@ impl Peer {
         match self.tunnel.update_timers(&mut self.buffer) {
             TunnResult::Done => {}
             TunnResult::Err(WireGuardError::ConnectionExpired) => {
-                self.endpoint.sock.take();
+                self.shutdown_endpoint();
             }
             TunnResult::Err(e) => {
                 eprintln!("update_timers error: {e:?}")
@@ -201,7 +204,7 @@ impl Peer {
                 Poll::Ready(Ok(_)) => Poll::Ready(read_buf.filled().len()),
                 Poll::Ready(Err(e)) => {
                     eprintln!("unable to receive packets: {e}");
-                    self.endpoint.sock.take();
+                    self.shutdown_endpoint();
                     Poll::Pending
                 }
                 Poll::Pending => Poll::Pending,
@@ -264,9 +267,7 @@ impl Sink<Packet> for Peer {
 
 #[pin_project]
 struct PeerSocketInner {
-    private_key: StaticSecret,
-    public_key: PublicKey,
-    rate_limiter: RateLimiter,
+    inner: Option<(StaticSecret, PublicKey, RateLimiter)>,
     reset_interval: time::Interval,
     sock: Arc<UdpSocket>,
     port: u16,
@@ -274,10 +275,7 @@ struct PeerSocketInner {
 }
 
 impl PeerSocketInner {
-    pub(crate) fn bind(private_key: StaticSecret, addr: SocketAddr) -> std::io::Result<Self> {
-        let public_key = PublicKey::from(&private_key);
-        let rate_limiter = RateLimiter::new(&public_key, 100);
-
+    pub(crate) fn bind(addr: SocketAddr) -> std::io::Result<Self> {
         let sock = socket2::Socket::new(
             socket2::Domain::for_address(addr),
             socket2::Type::DGRAM,
@@ -285,6 +283,8 @@ impl PeerSocketInner {
         )?;
 
         sock.set_reuse_address(true)?;
+        #[cfg(not(target_os = "windows"))]
+        sock.set_reuse_port(true)?;
         let bind_addr = addr.into();
         sock.bind(&bind_addr)?;
         sock.set_nonblocking(true)?;
@@ -295,14 +295,19 @@ impl PeerSocketInner {
         let port = sock.local_addr()?.port();
 
         Ok(Self {
-            private_key,
-            public_key,
-            rate_limiter,
+            inner: None,
             reset_interval: time::interval(Duration::from_secs(1)),
             sock,
             port,
             buffer: [0; MAX_UDP_SIZE],
         })
+    }
+
+    pub(crate) fn set_key(&mut self, private_key: StaticSecret) {
+        let public_key = PublicKey::from(&private_key);
+        let rate_limiter = RateLimiter::new(&public_key, 100);
+
+        self.inner = Some((private_key, public_key, rate_limiter));
     }
 
     pub(crate) fn port(&mut self) -> u16 {
@@ -327,16 +332,20 @@ impl Stream for PeerSocketInner {
 
         let this = self.project();
 
+        let (private_key, public_key, rate_limiter) = match this.inner {
+            Some(r) => r,
+            None => return Poll::Pending,
+        };
+
         if this.reset_interval.poll_tick(cx).is_ready() {
-            this.rate_limiter.reset_count();
+            rate_limiter.reset_count();
         }
 
         let addr = ready!(this.sock.poll_recv_from(cx, &mut dst_buf))?;
 
         let len = dst_buf.filled().len();
         let parsed_packet =
-            match this
-                .rate_limiter
+            match rate_limiter
                 .verify_packet(Some(addr.ip()), dst_buf.filled(), &mut buf)
             {
                 Ok(packet) => packet,
@@ -349,7 +358,7 @@ impl Stream for PeerSocketInner {
 
         let peer = match &parsed_packet {
             noise::Packet::HandshakeInit(p) => {
-                parse_handshake_anon(this.private_key, this.public_key, p)
+                parse_handshake_anon(private_key, public_key, p)
                     .ok()
                     .map(|hh| PeerId::PublicKey(x25519::PublicKey::from(hh.peer_static_public)))
             }
@@ -382,15 +391,13 @@ pub(crate) struct PeerSocket {
 }
 
 impl PeerSocket {
-    pub(crate) fn new(private_key: StaticSecret, port: u16) -> std::io::Result<Self> {
+    pub(crate) fn new(port: u16) -> std::io::Result<Self> {
         let mut v4 = PeerSocketInner::bind(
-            private_key.clone(),
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)),
         )?;
         let port = v4.port();
 
         let v6 = PeerSocketInner::bind(
-            private_key,
             SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0)),
         )?;
 
@@ -407,6 +414,11 @@ impl PeerSocket {
             SocketAddr::V4(_) => self.v4.sock.clone(),
             SocketAddr::V6(_) => self.v6.sock.clone(),
         }
+    }
+
+    pub(crate) fn set_key(&mut self, private_key: StaticSecret) {
+        self.v4.set_key(private_key.clone());
+        self.v6.set_key(private_key);
     }
 }
 

@@ -4,11 +4,12 @@ use std::{
 };
 
 use async_compat::Compat;
-use futures::{AsyncRead, AsyncWrite, Sink, Stream};
+use futures::{AsyncRead, AsyncWrite, Future, FutureExt, Sink, Stream, StreamExt};
 use pin_project::pin_project;
-use tokio_util::codec::Framed;
+use tokio::task::{JoinError, JoinHandle};
+use tokio_util::{codec::Framed, sync::CancellationToken};
 
-use crate::{codec::TunPacketCodec, packet::Packet};
+use crate::{api, codec::TunPacketCodec, packet::Packet, tunnel::Tunnel};
 
 #[pin_project]
 pub struct Device<D> {
@@ -63,5 +64,87 @@ where
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.project().inner.poll_close(cx)
+    }
+}
+
+
+pub struct TunnelDevice<D> {
+    device: D,
+    peers: Tunnel,
+}
+
+impl<D> TunnelDevice<D>
+where
+    D: Stream + Sink<Packet>,
+{
+    pub fn new(device: D) -> std::io::Result<Self> {
+        let peers = Tunnel::new()?;
+
+        Ok(Self { device, peers })
+    }
+}
+
+impl<D> TunnelDevice<D>
+where
+    D: Stream<Item = Result<Packet, std::io::Error>>
+        + Sink<Packet, Error = std::io::Error>
+        + Unpin
+        + Send
+        + 'static,
+{
+    async fn run(self, token: CancellationToken) {
+        let (dev_sink, dev_stream) = self.device.split();
+        let (peers_sink, peers_stream) = self.peers.split();
+
+        futures::select! {
+            _ = token.cancelled().fuse() => {
+            },
+            r  = dev_stream.forward(peers_sink).fuse() => {
+                println!("done dev -> peers: {r:?}");
+            },
+            r  = peers_stream.forward(dev_sink).fuse() => {
+                println!("done peers -> dev: {r:?}");
+            }
+        }
+    }
+
+    pub fn spawn(self) -> TunnelDeviceHandle {
+        let token: CancellationToken = CancellationToken::new();
+        let thread_token = token.child_token();
+        let api_channel = self.peers.open_api();
+
+        let handle = tokio::spawn(async move {
+            self.run(thread_token).await;
+        });
+
+        TunnelDeviceHandle {
+            token,
+            handle,
+            api_channel,
+        }
+    }
+}
+
+pub struct TunnelDeviceHandle {
+    token: CancellationToken,
+    handle: JoinHandle<()>,
+    api_channel: api::ApiChannel,
+}
+
+impl TunnelDeviceHandle {
+    pub fn api(&self) -> api::ApiChannel {
+        self.api_channel.clone()
+    }
+
+    pub fn cancel(&self) {
+        self.token.cancel()
+    }
+}
+
+impl Future for TunnelDeviceHandle {
+    type Output = Result<(), JoinError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.handle.poll_unpin(cx)
     }
 }
