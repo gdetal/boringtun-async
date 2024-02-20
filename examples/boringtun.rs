@@ -79,7 +79,7 @@ async fn main() {
     let private_key = "aCyyrK5JeEPNkCs4fm92YcYnefQSvekUeJUGl1Kh5UE="
         .parse::<KeyBytes>()
         .unwrap();
-    let mut tunnel = Tunnel::new(StaticSecret::from(private_key.0), dev).unwrap();
+    let tunnel = Tunnel::new(StaticSecret::from(private_key.0), dev).unwrap();
 
     let peer_public_key = "MK3425tJbRhEz+1xQLxlL+l6GNl52zKNwo5V0fHEwj4="
         .parse::<KeyBytes>()
@@ -87,20 +87,20 @@ async fn main() {
     let peer_endpoint = "195.181.167.193:51820".parse().unwrap();
     let allowed_ips = vec![IpNetwork::from_str_truncate("0.0.0.0/0").unwrap()];
 
+    let tunnel = tunnel.spawn();
+
     tunnel
+        .api()
         .add_peer(
             PublicKey::from(peer_public_key.0),
             peer_endpoint,
-            &allowed_ips,
+            allowed_ips.clone(),
         )
+        .await
         .unwrap();
 
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {},
-        res = tunnel.run() => {
-            if let Err(e) = res {
-                eprintln!("failed with {e}");
-            }
-        },
-    };
+    tokio::signal::ctrl_c().await.unwrap();
+    tunnel.cancel();
+
+    tunnel.await.unwrap();
 }

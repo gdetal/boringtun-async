@@ -212,6 +212,7 @@ dependencies = [
  "parking_lot",
  "pin-project",
  "socket2",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tun",

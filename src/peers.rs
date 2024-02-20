@@ -5,13 +5,14 @@ use std::{
 };
 
 use boringtun::x25519::{PublicKey, StaticSecret};
-use futures::{ready, Sink, Stream};
+use futures::{channel::mpsc, ready, Sink, Stream};
 use indexmap::IndexMap;
 use ip_network_table::IpNetworkTable;
 use pin_project::pin_project;
 use tokio_util::bytes::BytesMut;
 
 use crate::{
+    api::{ApiChannel, ApiMessage, ApiRequest},
     packet::Packet,
     peer::{Peer, PeerId, PeerSocket},
     MAX_UDP_SIZE,
@@ -24,11 +25,14 @@ pub struct Peers {
     peers_by_ip: IpNetworkTable<usize>,
     listen_port: u16,
     peers_socket: PeerSocket,
+    channel: (mpsc::Receiver<ApiRequest>, mpsc::Sender<ApiRequest>),
 }
 
 impl Peers {
     pub fn new(private_key: StaticSecret, port: u16) -> std::io::Result<Self> {
         let peers_socket = PeerSocket::new(private_key.clone(), port)?;
+
+        let (sender, receiver) = mpsc::channel(1);
 
         Ok(Self {
             private_key,
@@ -36,10 +40,20 @@ impl Peers {
             peers_by_ip: IpNetworkTable::new(),
             listen_port: port,
             peers_socket,
+            channel: (receiver, sender),
         })
     }
 
-    pub fn add_peer(
+    pub fn open_api(&self) -> ApiChannel {
+        ApiChannel::new(self.channel.1.clone())
+    }
+
+    fn clear_peers(&mut self) {
+        self.peers.clear();
+        self.peers_by_ip = IpNetworkTable::new();
+    }
+
+    fn add_peer(
         &mut self,
         public_key: PublicKey,
         endpoint: SocketAddr,
@@ -66,10 +80,30 @@ impl Peers {
         Ok(())
     }
 
+    fn poll_api_channel(&mut self, cx: &mut Context<'_>) {
+        if let Poll::Ready(Some(req)) = Pin::new(&mut self.channel.0).poll_next(cx) {
+            let (msg, mut replier) = req.into();
+            match msg {
+                ApiMessage::PeerFlush => {
+                    self.clear_peers();
+                }
+                ApiMessage::PeerAdd {
+                    public_key,
+                    endpoint,
+                    allowed_ips,
+                } => replier.reply(self.add_peer(public_key, endpoint, allowed_ips.as_ref())),
+            }
+        }
+    }
+
     pub(crate) fn poll_peers_next(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<std::io::Result<Packet>>> {
+        if self.peers.is_empty() {
+            return Poll::Pending;
+        }
+
         let start = fastrand::usize(0..self.peers.len());
         let mut index = start;
 
@@ -135,6 +169,8 @@ impl Stream for Peers {
     type Item = Result<Packet, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.poll_api_channel(cx);
+
         if let Poll::Ready(r) = self.as_mut().poll_peers_next(cx) {
             return Poll::Ready(r);
         }

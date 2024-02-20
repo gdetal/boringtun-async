@@ -16,6 +16,7 @@ async-compat = "0.2.3"
 etherparse = "0.14.2"
 fastrand = "2.0.1"
 indexmap = "2.2.3"
+thiserror = "1.0.57"
 
 [dependencies.boringtun]
 version = "0.6.0"

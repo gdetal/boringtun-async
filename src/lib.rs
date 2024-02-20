@@ -1,3 +1,4 @@
+mod api;
 mod codec;
 mod device;
 mod packet;
