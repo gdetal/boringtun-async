@@ -17,6 +17,7 @@ etherparse = "0.14.2"
 fastrand = "2.0.1"
 indexmap = "2.2.3"
 thiserror = "1.0.57"
+base64 = "0.21.7"
 
 [dependencies.boringtun]
 version = "0.6.0"
@@ -29,9 +30,11 @@ features = ["time", "net", "io-util"]
 version = "0.7"
 features = ["codec"]
 
-[dev-dependencies]
+[dependencies.tun]
 # last version of tun fixes a performance issue on windows:
-tun = { git = "https://github.com/meh/rust-tun.git", features = ["async"] }
+git = "https://github.com/meh/rust-tun.git"
+features = ["async"]
+
+[dev-dependencies]
 tokio = { version = "1.36.0", features = ["full"] }
-base64 = "0.21.7"
 net-route = "0.2.11"

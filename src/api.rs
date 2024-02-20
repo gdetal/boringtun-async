@@ -7,6 +7,8 @@ use futures::{
 };
 use ip_network::IpNetwork;
 
+use crate::keys;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("api closed")]
@@ -15,6 +17,8 @@ pub enum ApiError {
     ChannelClosed(#[from] oneshot::Canceled),
     #[error("I/O error: {0}")]
     IO(#[from] std::io::Error),
+    #[error("Key error")]
+    Key(#[from] keys::KeyParseError),
     #[error("error: {0}")]
     Other(String),
 }
@@ -23,7 +27,7 @@ impl From<&str> for ApiError {
     fn from(value: &str) -> Self {
         Self::Other(value.to_owned())
     }
-} 
+}
 
 pub type ApiResult = Result<(), ApiError>;
 
@@ -82,8 +86,11 @@ impl ApiChannel {
         Self(channel)
     }
 
-    pub async fn private_key(&mut self, key: StaticSecret) -> ApiResult {
-        let (req, recv) = ApiRequest::new(ApiMessage::PrivateKey(key));
+    pub async fn private_key<K>(mut self, key: K) -> ApiResult
+    where
+        K: TryInto<keys::PrivateKey, Error = keys::KeyParseError>,
+    {
+        let (req, recv) = ApiRequest::new(ApiMessage::PrivateKey(key.try_into()?.into()));
         self.0.send(req).await?;
         recv.await?
     }
@@ -94,14 +101,17 @@ impl ApiChannel {
         recv.await?
     }
 
-    pub async fn add_peer(
+    pub async fn add_peer<K>(
         &mut self,
-        public_key: PublicKey,
+        public_key: K,
         endpoint: SocketAddr,
         allowed_ips: Vec<ip_network::IpNetwork>,
-    ) -> ApiResult {
+    ) -> ApiResult
+    where
+        K: TryInto<keys::PublicKey, Error = keys::KeyParseError>,
+    {
         let (req, recv) = ApiRequest::new(ApiMessage::PeerAdd {
-            public_key,
+            public_key: public_key.try_into()?.into(),
             endpoint,
             allowed_ips,
         });

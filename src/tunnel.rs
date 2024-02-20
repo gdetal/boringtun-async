@@ -29,12 +29,16 @@ pub struct Tunnel {
 }
 
 impl Tunnel {
-    pub fn new() -> std::io::Result<Self> {
-        let peers_socket = PeerSocket::new(0)?;
+    pub fn new(private_key: Option<StaticSecret>, port: u16) -> std::io::Result<Self> {
+        let mut peers_socket = PeerSocket::new(port)?;
         let (sender, receiver) = mpsc::channel(1);
 
+        if let Some(ref key) = private_key {
+            peers_socket.set_key(key.clone());
+        }
+
         Ok(Self {
-            private_key: None,
+            private_key,
             peers: Default::default(),
             peers_by_ip: IpNetworkTable::new(),
             listen_port: peers_socket.port,

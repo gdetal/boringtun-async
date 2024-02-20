@@ -345,9 +345,7 @@ impl Stream for PeerSocketInner {
 
         let len = dst_buf.filled().len();
         let parsed_packet =
-            match rate_limiter
-                .verify_packet(Some(addr.ip()), dst_buf.filled(), &mut buf)
-            {
+            match rate_limiter.verify_packet(Some(addr.ip()), dst_buf.filled(), &mut buf) {
                 Ok(packet) => packet,
                 Err(TunnResult::WriteToNetwork(cookie)) => {
                     this.sock.try_send_to(cookie, addr).ok();
@@ -357,11 +355,9 @@ impl Stream for PeerSocketInner {
             };
 
         let peer = match &parsed_packet {
-            noise::Packet::HandshakeInit(p) => {
-                parse_handshake_anon(private_key, public_key, p)
-                    .ok()
-                    .map(|hh| PeerId::PublicKey(x25519::PublicKey::from(hh.peer_static_public)))
-            }
+            noise::Packet::HandshakeInit(p) => parse_handshake_anon(private_key, public_key, p)
+                .ok()
+                .map(|hh| PeerId::PublicKey(x25519::PublicKey::from(hh.peer_static_public))),
             noise::Packet::HandshakeResponse(p) => {
                 Some(PeerId::Index((p.receiver_idx >> 8) as usize))
             }
@@ -392,14 +388,18 @@ pub(crate) struct PeerSocket {
 
 impl PeerSocket {
     pub(crate) fn new(port: u16) -> std::io::Result<Self> {
-        let mut v4 = PeerSocketInner::bind(
-            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)),
-        )?;
+        let mut v4 = PeerSocketInner::bind(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::UNSPECIFIED,
+            port,
+        )))?;
         let port = v4.port();
 
-        let v6 = PeerSocketInner::bind(
-            SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0)),
-        )?;
+        let v6 = PeerSocketInner::bind(SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::UNSPECIFIED,
+            port,
+            0,
+            0,
+        )))?;
 
         Ok(Self {
             v4,
